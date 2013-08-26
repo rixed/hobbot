@@ -1,0 +1,7 @@
+event.ml
+irc.ml
+*.lis
+*.log
+*.tex
+*.html
+*.pdf

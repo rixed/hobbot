@@ -1,0 +1,57 @@
+@! vim:sw=4 ts=4 sts=4 expandtab spell spelllang=en
+@p maximum_input_line_length = 999999
+@! This is a FunnelWeb source file
+@! Process it with:
+@! $ fw hobbot.fw +u
+@! to build both the doc (hobbot.html) and the source code (hobbot.ml + friends)
+
+@A@<What is Hobbot@>
+
+Hobbot is a IRC robot which intent is to make development of IRC services
+easier. It handle IRC protocol and offer service author a simple event driven
+API, connection policy and a persistant storage so they can focus solely on the
+service.
+
+Services can react to these events:
+
+- connect
+- join
+- leave
+- private message
+- public message (directed at me, mentionning me, others)
+- other people join/leave/quit
+- channel mode change
+- user mode change
+- other IRC event (such as netsplit)
+
+And be configured with:
+
+- a name
+- a list of channels to join (which name may be a regular expression instead), given
+  a condition (ie. a function taking all the channel properties and returning a bool
+  commanding actual join)
+- an accepted rate of output messages (note that there is also a global max output rate
+  that can never be exceeded)
+
+For the sake of simplicity and portability both in space and time, hobbit is designed
+around a traditional UNIX event loop using select (no system nor lightweight threads).
+
+We will now expose the program, starting from this event loop, then up to the
+IRC protocol implementation and the service API. We will then expose the
+various modules of secondary importance, such as data persistence, command line
+interface, and so on. The presentation will be complete with a few sample services.
+
+All of this will be implemented in OCaml for it is the more concise statically typed
+language I'm familiar with.
+
+@i event.fw
+@i irc.fw
+@A@<The Plugin API@>
+@A@<State@>
+@B@<Persistance@>
+@B@<Oblivion@>
+@A@<Command Line Interface@>
+@A@<Samples@>
+@B@<Fortune@>
+@B@<Mailbox Service@>
+

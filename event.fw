@@ -1,0 +1,297 @@
+@! vim:sw=4 ts=4 sts=4 expandtab spell spelllang=en
+@p maximum_input_line_length = 999999
+@p maximum_output_line_length = 999999
+@A@<The Event Loop@>
+@B@<General Principles@>
+
+The traditional UNIX event loop is designed around a call to @{select@},
+which wait for a given set of file descriptors to be ready for reading
+and/or writing. As everything tends to be a file in UNIX, you can easily
+arrange for any event source/sink to be files, and then @{select@} the
+next file on which you can act, perform the action, and repeat.
+
+Problems with the @{select@} loop:
+
+- some event sources/sinks are not files and thus can not be selected ; for
+  instance: signals, condition variables...
+
+- you may not be able to read a while message from a readable file; if that's
+  the case you will have to buffer what have just been read until the rest of
+  the message is received, since you cannot unread (it would make the file
+  readable again yet no more content is available);
+
+- conversely, you may not be able to write a full message to a writable file;
+  again, you'd have to buffer what you could no write;
+
+- you loose all memory between messages, thus must generally lookup some huge
+  data structure to find out what's the context for an incoming message (for
+  instance, what was the state of communication with this given remote client
+  or server);
+
+- one select loop makes use of only one execution core.
+
+
+All of these problems are elegantly solved by threads, but threads have issues
+as well:
+
+- a thread might be preempted at any place which make necessary to use some
+  kind of synchronisation (such as mutexes) which most often than not have
+  terrible consequences on maintainability;
+
+- thread stacks contain typically more information than the bare required
+  "contexts", thus requiring more memory;
+
+- a program with many threads is harder to instrument/debug;
+
+- incidentally, OCaml runtime (as of today) makes it hard to use several
+  execution cores anyway.
+
+In our case (as in most cases) no approach is intrinsically better. I've chosen
+to go the @{select@} route because it better suits my mood.
+
+@B@<How to get there in OCaml@>
+
+The reader is supposed to be moderately familiar with system programming and OCaml.
+By the way, there is a good tutorial on this very topic that's a good read:
+
+http://ocamlunix.forge.ocamlcore.org/
+
+Which is a translation of this original document in french:
+
+http://cristal.inria.fr/~remy/poly/system/camlunix/index.html
+
+You will see that all traditional UNIX system calls dealing with I/O are readily
+available in stock OCaml, only simpler.
+
+In C, the general pattern with the @{select@} loop goes as follow:
+
+First you hand a pair of initially empty sets of file descriptors over all your
+event sources so that they have a chance to add their file descriptor of
+interest in it (some may want to monitor several file descriptors, as is
+typically the case for a TCP server for instance, which wants to wait for new
+connection as well as anything to read from already connected clients). Then you
+wait into @{select@} than something happen to one of these files, and finally you
+return the resulting sets of modified files to each event handlers to check and
+take good care of. Notice that each event handler must lookup its own files into
+the resulting set which stores changed files descriptors of all event handlers.
+
+OCaml standard library try to make this easier by using lists of file
+descriptors instead of @{FD_SET@}s. This makes the first part of this loop
+(collecting monitored file descriptors) easier at the expense of making the
+second part (dispatching the result set to event handlers) very ineffective
+since event handlers will have to check if its file descriptors are present in
+a list. Performance is not an issue here but it's still interesting to notice
+how, contrary to what one might expect, a more strictly typed language than C,
+such as OCaml, happen to use too broad types in some places.
+
+So we need two functions for each event handler: one that return the lists of
+file descriptors to monitor (but to avoid merging lists we will rather pass the
+lists to be completed), and one that accept the lists of readable and writable
+file descriptors and act on it; notice that we keep carrying around the third set
+of file descriptors (the one for exceptional conditions) despite we won't use it
+(this provision for exceptional conditions are largely useless).
+
+@$@<EventHandler@>==@{@-
+type fd = Unix.file_descr
+
+type monitored_files = fd list (* readables *)
+                     * fd list (* writables *)
+                     * fd list (* exceptional conditions *)
+
+type handler = { register_files : monitored_files -> monitored_files ;
+                  process_files : monitored_files -> unit }
+@}
+
+So that given the list @{events@} of such events the select loop body is rather short:
+
+@$@<SelectLoopBody@>==@{@-
+let select_once events =
+    let collect_all_monitored_files events =
+        List.fold_left (fun files event ->
+            event.register_files files)
+            ([],[],[]) events
+    and process_all_monitored_files events files =
+        List.iter (fun event -> event.process_files files) events in
+
+    let open Unix in
+    let rfiles, wfiles, efiles = collect_all_monitored_files events in
+    try let changed_files = select rfiles wfiles efiles (-1.) in
+        process_all_monitored_files events changed_files
+    with
+        @<HandleSelectErrors@>
+@}
+
+The only error of interrest being:
+
+@$@<HandleSelectErrors@>==@{@-
+| Unix_error (EINTR,_,_) -> ()
+@}
+
+Such that the select loop itself reduces to:
+
+@$@<SelectLoop@>+=@{@-
+@<SelectLoopBody@>
+
+let events = ref []
+
+let select_loop () =
+    while true do
+        select_once !events
+    done
+@}
+
+You might be wondering why we use a global mutable list for the events.
+This is to allow an event handler to removes itself from the list of
+active events, or to register new event handlers, using these helper
+functions:
+
+@$@<SelectLoop@>+=@{@-
+let register event =
+    events := event :: !events
+
+let unregister event =
+    events := List.filter ((!=) event) !events
+@}
+
+Note that we use physical equality to @{unregister@} an event.  The event
+handler that whish to be able to unregister itself must then take care of
+keeping a grip on itself.
+
+Packaging all this into an @{Event@} module:
+
+@O@<event.ml@>==@{@-
+open Batteries
+@<EventHandler@>
+@<SelectLoop@>
+@<EventHandlerSamples@>
+@}
+
+@B@<A TCP Client@>
+
+Now that this basic framework is in place, lets implement an @{Event.handler@}
+for a basic TCP client. This is easy since a TCP client has to deal with only
+one file descriptor.
+
+Before building an event handler we need to know how to build a connected socket
+from a hostname and a servicename (both strings):
+
+@$@<TcpConnect@>==@{@-
+let tcp_connect host service =
+    let open Unix in
+    getaddrinfo host service [AI_SOCKTYPE SOCK_STREAM ; AI_CANONNAME ] |>
+    List.find_map (fun ai ->
+        Log.debug "Trying to connect to %s:%s" ai.ai_canonname service ;
+        try let sock = socket ai.ai_family ai.ai_socktype ai.ai_protocol in
+            connect sock ai.ai_addr ;
+            Some sock
+        with exn ->
+            Log.debug "Cannot connect: %s" (Printexc.to_string exn) ;
+            None)
+@}
+
+We will store this socket into a data structure representing a TCP client.
+What else do we need in this record? Remember we said we'll have to buffer
+reads and writes, so we need two buffers as well. Later, we may want to add
+enough informations to reconnect automatically to the server.
+
+@$@<TcpClient@>==@{@-
+type t = { sock : Unix.file_descr ;
+           rbuf : Buffer.t ;
+           wbuf : Buffer.t }
+@}
+
+Given this record, the register_files for this TCP client is trivial:
+
+@$@<TcpRegisterFiles@>==@{@-
+let buffer_is_empty b =
+    Buffer.length b = 0
+
+let register_files t (rfiles, wfiles, efiles) =
+    t.sock :: rfiles,
+    (if buffer_is_empty t.wbuf then wfiles else t.sock :: wfiles),
+    efiles
+@}
+
+Notice that with regard to writing, we merely ask to monitor writability of the
+file if we actually have something to write. Event handler will merely append
+content to write in the write buffer @{wbuf@} so that this direction of the
+communication is quite simple:
+
+@$@<TcpWrite@>==@{@-
+(* Called by event handler whenever sock is writable *)
+let handle_write t =
+    let content = Buffer.contents t.wbuf in
+    let sz = Unix.single_write t.sock content 0 (String.length content) in
+    Buffer.clear t.wbuf ;
+    Buffer.add_substring t.wbuf content sz (String.length content - sz)
+
+let send_string t str =
+    Buffer.add_string t.wbuf str
+@}
+
+Notice that we requeue what was not written into the buffer. The stock stdlib
+buffers are not very convenient for this kind of buffering, and should we care
+about performance at this point then we should rewrite this using a more to the
+point buffer implementation.
+
+With regard to reception of messages a generic TCP client cannot do much without knowing
+the length of incoming messages, that is why the @{handle_read@} function is the
+responsibility of the user. We now have completed our small @{TcpClient@} event
+handler:
+
+@$@<EventHandlerSamples@>+=@{@-
+module TcpClient =
+struct
+    @<TcpClient@>
+    @<TcpConnect@>
+    @<TcpRegisterFiles@>
+    @<TcpWrite@>
+
+    let make host service reader =
+        try let t = { sock = tcp_connect host service ;
+                      rbuf = Buffer.create 500 ;
+                      wbuf = Buffer.create 500 } in
+            { register_files = register_files t ;
+               process_files = fun (rfiles, _, _) ->
+                                   (* Only call reader if t.sock is readable *)
+                                   if List.mem t.sock rfiles then
+                                       reader t }
+        with Not_found ->
+                failwith ("Cannot connect to "^ host ^":"^ service)
+end
+@}
+
+But what we want is not this mere generic TCP client but an IRC client
+that will call specific callbacks to handle interesting IRC events.
+As we are about to see, IRC is a line oriented protocol; So let's build
+a line oriented TCP client.
+
+This is enough to build a generic @{reader@} out of a @{line_reader@}
+that should receive only commplete lines, one by one, without the need
+to care about the read buffer:
+
+@$@<EventHandlerSamples@>+=@{@-
+
+(* Given a line reading function returns a reader function
+   suitable for TcpClient.make *)
+let reader_of_line_reader line_reader t =
+    let open TcpClient in
+    (* Append what can be read from t.sock into rbuf *)
+    let str = String.create 1500 in
+    let sz = Unix.read t.sock str 0 (String.length str) in
+    Buffer.add_substring t.rbuf str 0 sz ;
+    (* Beware that we may have 0, 1 or more lines in rbuf *)
+    let rec try_next_line content ofs =
+        try let eol = String.find_from content ofs "\r\n" in
+            line_reader (String.sub content ofs (eol - ofs)) ;
+            try_next_line content (eol+2)
+        with Not_found -> ofs in
+    let content = Buffer.contents t.rbuf in
+    Buffer.clear t.rbuf ;
+    let ofs = try_next_line content 0 in
+    Buffer.add_substring t.rbuf content ofs (String.length content - ofs)
+@}
+
+(Notice that @{String.find_from@} will raise Not_found if @{ofs@} points to the
+end of the string (nul terminator is a valid position, @^h(e0) la C).
+

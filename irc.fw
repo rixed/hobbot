@@ -1,0 +1,142 @@
+@! vim:sw=4 ts=4 sts=4 expandtab spell spelllang=en
+@p maximum_input_line_length = 999999
+@p maximum_output_line_length = 999999
+@A@<The IRC Client@>
+@B@<Notes about the IRC protocol@>
+
+IRC is defined in RFC 1459 which can be obtained here:
+
+https://tools.ietf.org/html/rfc1459
+
+Most relevant characteristics of the IRC protocol when implementing a client:
+
+- IRC is text based (although characters encoding is intentionally not specified);
+- it's line oriented, wit end of line being CR-LF (\r\n), with 512 chars max;
+- clients are identified by a nickname of 9 chars max and channels by a name
+  of 200 chars max;
+- there is no limit on how many channels a client can join;
+- all messages between a server and a client are composed of an optional
+  prefix, a command (which is a word or a 3 digit number for replies) followed
+  by parameters, separated by space(s);
+- each parameter may be a list of values (separated by coma).
+
+The exact syntax is given in 2.3.1. We can parse this using either:
+
+- bison-like parser,
+- parser combinators (either custom or the one present in Batteries),
+- regular expressions,
+- manual string parsing
+
+Regular expression seams the more appropriate here: more formal parsing
+seams overkill considering the simplicity of the grammar and manual
+string parsing is too error prone.
+
+The few parameters which type is not a trivial strings (such as the list of
+channel modes, the integer hop count...) are of limited interest for an IRC
+bot. Thus, instead of (de)serializing every possible command into a proper
+type, it's easier for everyone (including the plugin author) to keep strings
+for commands, error codes, channel names, and so on. So it's enough to parse a
+message into this type:
+
+@$@<IRCMsgType@>+=@{@-
+type msg = string * string * string list list
+@}
+
+It's easy to turn any command string into this type using these regular expressions:
+
+@$@<IRCMsgRegex@>==@{@-
+let msg_re = Str.regexp "\\(:\\([^ \000]+\\) +\\)?\\([^ \000]+\\)\\(.*\\)$"
+let param_re = Str.regexp "\\( +\\(\\([^ \000:][^ \000]\\)\\|\\(:[^ \000]+$\\)\\)\\)"
+@}
+
+Using an implementation such as:
+
+@$@<IRCMsgParse@>+=@{@-
+let parse msg =
+    let open Str in
+    if not (string_match msg_re msg 0) then
+        failwith "Not an IRC message" ;
+    let prefix = try matched_group 1 msg
+                 with Not_found -> ""
+    and command = matched_group 2 msg
+    and ofs = group_beginning 3 in
+    (* Build a list of strings from params *)
+    let rec next_param prev ofs =
+        if ofs = String.length msg then
+            List.rev prev
+        else (
+            if not (string_match param_re msg ofs) then
+                failwith "Cannot parse msg parameters" ;
+            let param, ofs =
+                try String.nsplit (matched_group 2 msg) ",",
+                    group_end 2
+                with Not_found ->
+                    [ matched_group 3 msg ],
+                    group_end 3 in
+            next_param (param :: prev) ofs
+        )
+    in
+    prefix, command, next_param [] ofs
+@}
+
+We'd better test this right away with a few messages taken from the RFC:
+
+@$@<IRCTests@>+=@{@-
+(*$= parse & ~printer:dump
+    (parse "PASS secretpasswordhere") \
+        ("", "PASS", [["secretpasswordhere"]])
+    (parse ":WiZ NICK Kilroy") \
+        ("WiZ" "NICK", [["Kilroy"]])
+    (parse "USER guest tolmoon tolsun :Ronnie Reagan") \
+        ("", "USER", [["guest"]; ["tolmoon"]; ["tolsun"]; ["Ronnie Reagan"]])
+    (parse ":tolsun.oulu.fi SERVER csd.bu.edu 5 :BU Central Server") \
+        (":tolsun.oulu.fi", "SERVER", [["csd.bu.edu"]; ["5"]; ["BU Central Server"]])
+    (parse "QUIT :Gone to have lunch") \
+        ("", "QUIT", [["Gone to have lunch"]])
+    (parse "QUIT  :") \
+        ("", "QUIT", [])
+    (parse "JOIN #foo,#bar fubar,foobar") \
+        ("", "QUIT", [["#foo";"#bar"]; ["fubar";"foobar"]])
+*)
+@}
+
+And testing that the function fails when it's supposed to:
+
+@$@<IRCTests@>+=@{@-
+let must_fail f x =
+    try ignore (f x) ; false
+    with _ -> true
+
+(*$T parse & ~printer:dump
+    must_fail parse ""
+    must_fail parse "Bonga"
+    must_fail parse " USER toomanyspace"
+    must_fail parse ": USER badprefix"
+    must_fail parse "USER no trailing space "
+*)
+@}
+
+We can now build an @{IrcClient@} from our @{TcpClient@}.
+This @{IrcClient@} will take a reader function that takes a @{msg@}.
+Here is how to build an event reader function from it:
+
+@$@<IRCReader@>==@{@-
+let reader_of_msg_reader msg_reader =
+    let line_reader line =
+        parse line |> msg_reader in
+    Event.reader_of_line_reader line_reader
+@}
+
+This will return a function for @{TcpClient.make@}.
+
+Putting it all together in an @{Irc@} module:
+
+@O@<irc.ml@>==@{@-
+open Batteries
+
+@<IRCMsgType@>
+@<IRCMsgRegex@>
+@<IRCMsgParse@>
+@<IRCTests@>
+@<IRCReader@>
+@}
