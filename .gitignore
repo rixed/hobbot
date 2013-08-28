@@ -1,6 +1,7 @@
 event.ml
 irc.ml
 api.ml
+loader.ml
 *.lis
 *.log
 *.tex

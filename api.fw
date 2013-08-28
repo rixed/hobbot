@@ -4,6 +4,8 @@
 
 @A@<The Plugin API@>
 
+@B@<The IRC Service handler@>
+
 Now let's think about what API would be nice for writing plug-ins with.
 
 Basically, as a plug-in author, we want our bot to:
@@ -15,7 +17,7 @@ Basically, as a plug-in author, we want our bot to:
 ...where the reaction is, usually, to send a private or public message.
 
 So ideally, a single function, given a nickname and a list of channels
-will perform the two first steps and everything else is via callbacks.
+will perform the two first steps and everything else is via a callback.
 The RFC states:
 
 "If a JOIN is successful, the user is then sent the channel's topic
@@ -26,19 +28,23 @@ The join can thus populate some state with the list of the users present
 on eqch channel (and keep this list updated as future notices are received).
 The plug-in can then query this internal list at will.
 
+Notice that, given this API, several plug-ins could share the same connection
+but we want a nickname for each service so we must have a connection per
+plug-in.
+
 @$@<APIState@>+=@{@-
 module StringSet = Set.Make (String)
 
-type state = { channels : (string, channel_state) Hashtbl.t }
+type state = { channels : (string, channel_state) Hashtbl.t ;
+                    tcp : Event.TcpClient.t }
 and channel_state = { topic : string ;
                       users : StringSet.t }
 
-let make_empty_state () =
-    { channels = Hashtbl.create 7 }
+let make_empty_state tcp =
+    { channels = Hashtbl.create 7 ; tcp }
 
-let event_handler ?(servername="irc.freenode.org") ?(servicename="irc")
-                  ?(nick="hobbot") ?pass channels on_msg =
-    let state = make_empty_state () in
+let start ~servername ~servicename
+          ~nick ?pass channels on_msg =
     let set_topic state chn topic =
         Hashtbl.modify_opt chn (function
             | None    -> Some { topic ; users = StringSet.empty }
@@ -50,10 +56,19 @@ let event_handler ?(servername="irc.freenode.org") ?(servicename="irc")
             | None    -> Some { topic = "" ; users }
             | Some st -> Some { st with users = StringSet.union users st.users })
             state.channels in
-    let msg_reader tcp = function
+    let msg_to_me =
+        let open Str in
+        let re = regexp ("^ *"^ quote nick ^" *: *\\(.*\\)$") in
+        fun msg ->
+            if string_match re msg 0 then
+                true, matched_group 1 msg
+            else
+                false, msg
+    in
+    let msg_reader state = function
         | _, "376", _ ->
             Log.debug "Received END of MOTD -> send JOIN" ;
-            Irc.join tcp channels
+            Irc.join state.tcp channels
         | _, "332", [_ ; [chn]; [topic]] ->
             Log.debug "Received TOPIC for channel %s: %s" chn topic ;
             set_topic state chn topic
@@ -64,27 +79,145 @@ let event_handler ?(servername="irc.freenode.org") ?(servicename="irc")
             Log.debug "Received NAMREPLY for channel %s, nicks: %s" chn nicks ;
             add_users state chn (String.nsplit nicks " ")
         | _, "PRIVMSG", [dsts; [msg]] ->
-            List.iter (fun dst -> on_msg state dst msg) dsts
+            Log.debug "Received PRIVMSG: %s" msg ;
+            let priv, msg = msg_to_me msg in
+            List.iter (fun dst ->
+                let priv = priv || dst = nick in
+                on_msg ~priv state dst msg) dsts
         | _, cmd, _ ->
             Log.debug "Ignoring command %s" cmd in
     (* Establish TCP connection *)
     let tcp = Event.TcpClient.make servername servicename in
+    (* Build a fresh new state *)
+    let state = make_empty_state tcp in
     (* Write the Join (won't be sent until event loop is run *)
     Irc.login tcp ?pass nick ;
     (* Build an event reader function from our IRC reader function *)
-    let reader = Irc.reader_of_msg_reader (msg_reader tcp) in
-    (* Return an event_handler for this IRC connection *)
-    Event.TcpClient.event_handler tcp reader
+    let reader = Irc.reader_of_msg_reader (msg_reader state) in
+    (* Build an event_handler for this IRC connection *)
+    let handler = Event.TcpClient.event_handler tcp reader in
+    (* And register it *)
+    Event.register handler
 @}
 
+We are now close to the real thing. The only part left is to choose how
+to build a real program or library that we could later extend with
+plug-ins.
 
-Which we can group together into the @{api@} module:
+@B@<Pluggable Architecture@>
+
+We have several ways to achieve what we want:
+
+- The traditional library: we could wrap all the code so far into a library
+  that the plug-in author can use; the problem here is that every plug-in must
+  implement its command line interface and we can't easily have a plug-in
+  that's using another one (for instance, a mailbox service that's using an
+  authentification service)
+
+- The traditional plug-ins: we can provide a single program that load one or
+  several plug-ins.
+
+- The dynamic plug-ins: we write a mere program with a basic bot which only
+  capability is to load other plug-ins (that will then connect to same server
+  and join same channels with their own socket and nick).
+
+This later architecture seams more fun for some reason ; perhaps because it's
+tempting to be able to make a remote machine load some DLL and execute it
+merely by ordering it to do so in an IRC channel (of course, this father of all
+bot should take his orders from a given nick only, and should look for
+libraries to load in a given directory only).
+
+Of course, we can mix the two last method: by letting the user choose on the
+command line which service it wants to load first, and defaulting to the
+service that loads new ones, we have the best of both world.
+
+Here is the code to load a library from a given directory in OCaml. First, the
+library path which is a global ref on a string (so that you can easily change
+it when parsing the command line, for instance):
+
+@$@<CmdLineParams@>+=@{@-
+let libdir = ref "."
+@}
+
+Then the code to load a library:
+
+@$@<LoadingLib@>+=@{@-
+exception InvalidName
+
+let load_lib libname =
+    if String.exists libname "/../" ||
+       String.starts_with libname "../" then
+        raise InvalidName ;
+    Dynlink.(loadfile (adapt_filename (!libdir ^"/"^ libname ^".cmo")))
+@}
+
+The loaded library can do anything, but is expected to start a new service on
+its own.
+
+So let's code this first bot which service is to spawn new services
+(of course this service will be started automatically otherwise we will have
+kind of a chicken and egg problem). Remember that a service is actually defined
+by it's @{on_msg@} callback:
+
+@$@<ServiceLoader@>+=@{@-
+let on_msg_to_loader =
+    let open Str in
+    let help_re = regexp "^ *help *$"
+    and load_re = regexp "^ *load *\\(.*\\) *$" in
+    fun ~priv state dst msg ->
+        if priv then (
+            if string_match help_re msg 0 then (
+                Irc.tell state.tcp [dst] "help... yourself"
+            ) else if string_match load_re msg 0 then (
+                let libname = matched_group 1 msg in
+                let result = try load_lib libname ; "loaded"
+                             with _ -> "fail" in
+                Irc.tell state.tcp [dst] result
+            )
+        )
+@}
+
+So we can regroup everything for the library into the @{api@} module:
 
 @O@<api.ml@>==@{@-
 open Batteries
 
+@<CmdLineParams@>
 @<APIState@>
+@<LoadingLib@>
 @}
 
-We also need a state to control the flow of outgoing messages, but we are going
-to delay this discussion for a later chapter.
+and then everything for our loading service into a @{loader@} module,
+that's going to be compiled as a module (cmo or cmxs) waiting for the
+main program to load it:
+
+@O@<loader.ml@>==@{@-
+open Batteries
+open Api
+
+@<ServiceLoader@>
+
+let init =
+    start ~servername:!servername
+          ~servicename:!servicename
+          ~nick:(!nick ^"-loader")
+          !channels on_msg_to_loader
+@}
+
+Notice that, since @{load_lib@} cannot pass anything to the loaded library
+the we are forced to use some global symbols from the main program to
+get servername and such. Again, these will be set from the command line
+anyway. We could technically get rid of these parameters from @{start@}
+arguments but I feel they belongs there.
+
+@$@<CmdLineParams@>+=@{@-
+let servername = ref "irc.freenode.org"
+let servicename = ref "irc"
+let nick = ref "hobbot"
+let channels = ref ["#hobbot"]
+@}
+
+Notice as well that we must come with unique name for the various service
+(both because the server and our remote users require it)
+
+TODO: move these cmd line params into a proper module

@@ -4,6 +4,11 @@
 @A@<The Event Loop@>
 @B@<General Principles@>
 
+Despite an IRC bot working generally with only one socket (the connection
+to the IRC server), we'd like our to be able to connect to various places
+(SQL databases, other network services...) That is why we insist on basing
+our program on an event loop.
+
 The traditional UNIX event loop is designed around a call to @{select@},
 which wait for a given set of file descriptors to be ready for reading
 and/or writing. As everything tends to be a file in UNIX, you can easily
@@ -102,21 +107,21 @@ type handler = { register_files : monitored_files -> monitored_files ;
                   process_files : monitored_files -> unit }
 @}
 
-So that given the list @{events@} of such events the select loop body is rather short:
+So that given the list @{handlers@} of such handlers the select loop body is rather short:
 
 @$@<SelectLoopBody@>==@{@-
-let select_once events =
-    let collect_all_monitored_files events =
-        List.fold_left (fun files event ->
-            event.register_files files)
-            ([],[],[]) events
-    and process_all_monitored_files events files =
-        List.iter (fun event -> event.process_files files) events in
+let select_once handlers =
+    let collect_all_monitored_files handlers =
+        List.fold_left (fun files handler ->
+            handler.register_files files)
+            ([],[],[]) handlers
+    and process_all_monitored_files handlers files =
+        List.iter (fun handler -> handler.process_files files) handlers in
 
     let open Unix in
-    let rfiles, wfiles, efiles = collect_all_monitored_files events in
+    let rfiles, wfiles, efiles = collect_all_monitored_files handlers in
     try let changed_files = select rfiles wfiles efiles (-1.) in
-        process_all_monitored_files events changed_files
+        process_all_monitored_files handlers changed_files
     with
         @<HandleSelectErrors@>
 @}
@@ -132,29 +137,29 @@ Such that the select loop itself reduces to:
 @$@<SelectLoop@>+=@{@-
 @<SelectLoopBody@>
 
-let events = ref []
+let handlers = ref []
 
 let select_loop () =
     while true do
-        select_once !events
+        select_once !handlers
     done
 @}
 
-You might be wondering why we use a global mutable list for the events.
+You might be wondering why we use a global mutable list for the handlers.
 This is to allow an event handler to removes itself from the list of
-active events, or to register new event handlers, using these helper
+active handlers, or to register new event handlers, using these helper
 functions:
 
 @$@<SelectLoop@>+=@{@-
-let register event =
-    events := event :: !events
+let register handler =
+    handlers := handler :: !handlers
 
-let unregister event =
-    events := List.filter ((!=) event) !events
+let unregister handler =
+    handlers := List.filter ((!=) handler) !handlers
 @}
 
-Note that we use physical equality to @{unregister@} an event.  The event
-handler that whish to be able to unregister itself must then take care of
+Note that we use physical equality to @{unregister@} an handler.  The event
+handler that wish to be able to unregister itself must then take care of
 keeping a grip on itself.
 
 Packaging all this into an @{Event@} module:
