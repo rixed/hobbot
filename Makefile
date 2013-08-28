@@ -14,7 +14,7 @@ all: hobbot.pdf
 
 doc: hobbot.pdf hobbot.html
 
-GEN_SOURCES = event.ml irc.ml
+GEN_SOURCES = event.ml irc.ml api.ml
 
 $(GEN_SOURCES): hobbot.fw
 	fw $(basename $<)
@@ -27,9 +27,11 @@ hobbot.tex: $(wildcard *.fw)
 
 event.ml: event.fw
 irc.ml: irc.fw
+api.ml: api.fw
 
-event.cmo irc.cmo: log.cmo
-irc.cmo: event.cmo
+api.cmo event.cmo irc.cmo: log.cmo
+irc.cmo api.cmo: event.cmo
+api.cmo: irc.cmo
 
 .SUFFIXES: .ml .mli .cmo .cmi .cmx .cmxs .opt .byte .tex .dvi .pdf
 

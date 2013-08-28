@@ -247,17 +247,19 @@ struct
     @<TcpRegisterFiles@>
     @<TcpWrite@>
 
-    let make host service reader =
-        try let t = { sock = tcp_connect host service ;
-                      rbuf = Buffer.create 500 ;
-                      wbuf = Buffer.create 500 } in
-            { register_files = register_files t ;
-               process_files = fun (rfiles, _, _) ->
-                                   (* Only call reader if t.sock is readable *)
-                                   if List.mem t.sock rfiles then
-                                       reader t }
+    let make host service =
+        try { sock = tcp_connect host service ;
+              rbuf = Buffer.create 500 ;
+              wbuf = Buffer.create 500 }
         with Not_found ->
                 failwith ("Cannot connect to "^ host ^":"^ service)
+
+    let event_handler t reader =
+        { register_files = register_files t ;
+           process_files = fun (rfiles, _, _) ->
+                               (* Only call reader if t.sock is readable *)
+                               if List.mem t.sock rfiles then
+                                   reader t }
 end
 @}
 

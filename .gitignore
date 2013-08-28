@@ -1,7 +1,15 @@
 event.ml
 irc.ml
+api.ml
 *.lis
 *.log
 *.tex
 *.html
 *.pdf
+*.annot
+*.cmo
+*.cmi
+*.cmx
+*.cma
+*.cmxa
+*.cmxs

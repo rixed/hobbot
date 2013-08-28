@@ -1,0 +1,90 @@
+@! vim:sw=4 ts=4 sts=4 expandtab spell spelllang=en
+@p maximum_input_line_length = 999999
+@p maximum_output_line_length = 999999
+
+@A@<The Plugin API@>
+
+Now let's think about what API would be nice for writing plug-ins with.
+
+Basically, as a plug-in author, we want our bot to:
+
+- connect using some nickname,
+- join a preset list of channels
+- react to some private message (or public message addressed to the nickname)
+
+...where the reaction is, usually, to send a private or public message.
+
+So ideally, a single function, given a nickname and a list of channels
+will perform the two first steps and everything else is via callbacks.
+The RFC states:
+
+"If a JOIN is successful, the user is then sent the channel's topic
+(using RPL_TOPIC) and the list of users who are on the channel (using
+RPL_NAMREPLY), which must include the user joining"
+
+The join can thus populate some state with the list of the users present
+on eqch channel (and keep this list updated as future notices are received).
+The plug-in can then query this internal list at will.
+
+@$@<APIState@>+=@{@-
+module StringSet = Set.Make (String)
+
+type state = { channels : (string, channel_state) Hashtbl.t }
+and channel_state = { topic : string ;
+                      users : StringSet.t }
+
+let make_empty_state () =
+    { channels = Hashtbl.create 7 }
+
+let event_handler ?(servername="irc.freenode.org") ?(servicename="irc")
+                  ?(nick="hobbot") ?pass channels on_msg =
+    let state = make_empty_state () in
+    let set_topic state chn topic =
+        Hashtbl.modify_opt chn (function
+            | None    -> Some { topic ; users = StringSet.empty }
+            | Some st -> Some { st with topic })
+            state.channels in
+    let add_users state chn users =
+        let users = List.fold_right StringSet.add users StringSet.empty in
+        Hashtbl.modify_opt chn (function
+            | None    -> Some { topic = "" ; users }
+            | Some st -> Some { st with users = StringSet.union users st.users })
+            state.channels in
+    let msg_reader tcp = function
+        | _, "376", _ ->
+            Log.debug "Received END of MOTD -> send JOIN" ;
+            Irc.join tcp channels
+        | _, "332", [_ ; [chn]; [topic]] ->
+            Log.debug "Received TOPIC for channel %s: %s" chn topic ;
+            set_topic state chn topic
+        | _, "331", _::[chn]::_  ->
+            Log.debug "Received NOTOPIC for channel %s" chn ;
+            set_topic state chn ""
+        | _, "353", [_; _; [chn]; [nicks]] ->
+            Log.debug "Received NAMREPLY for channel %s, nicks: %s" chn nicks ;
+            add_users state chn (String.nsplit nicks " ")
+        | _, "PRIVMSG", [dsts; [msg]] ->
+            List.iter (fun dst -> on_msg state dst msg) dsts
+        | _, cmd, _ ->
+            Log.debug "Ignoring command %s" cmd in
+    (* Establish TCP connection *)
+    let tcp = Event.TcpClient.make servername servicename in
+    (* Write the Join (won't be sent until event loop is run *)
+    Irc.login tcp ?pass nick ;
+    (* Build an event reader function from our IRC reader function *)
+    let reader = Irc.reader_of_msg_reader (msg_reader tcp) in
+    (* Return an event_handler for this IRC connection *)
+    Event.TcpClient.event_handler tcp reader
+@}
+
+
+Which we can group together into the @{api@} module:
+
+@O@<api.ml@>==@{@-
+open Batteries
+
+@<APIState@>
+@}
+
+We also need a state to control the flow of outgoing messages, but we are going
+to delay this discussion for a later chapter.

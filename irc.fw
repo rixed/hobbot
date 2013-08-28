@@ -4,9 +4,15 @@
 @A@<The IRC Client@>
 @B@<Notes about the IRC protocol@>
 
-IRC is defined in RFC 1459 which can be obtained here:
+IRC is defined in RFC 1459, partially superseded by RFC 2812, which can be
+obtained here:
 
 https://tools.ietf.org/html/rfc1459
+https://tools.ietf.org/html/rfc2812
+
+Especially, the format of replies were changed in RFC 2812 for something
+closer to what's actually used by servers. For some replies, though, we
+followed encountered behavior instead of RFCs.
 
 Most relevant characteristics of the IRC protocol when implementing a client:
 
@@ -18,7 +24,9 @@ Most relevant characteristics of the IRC protocol when implementing a client:
 - all messages between a server and a client are composed of an optional
   prefix, a command (which is a word or a 3 digit number for replies) followed
   by parameters, separated by space(s);
-- each parameter may be a list of values (separated by coma).
+- each parameter may be a list of values (separated by coma);
+- overall, the protocol is designed to interact almost directly with a human rather
+  than a program.
 
 The exact syntax is given in 2.3.1. We can parse this using either:
 
@@ -127,9 +135,45 @@ let reader_of_msg_reader msg_reader =
     Event.reader_of_line_reader line_reader
 @}
 
-This will return a function for @{TcpClient.make@}.
+This will return a function suitable for @{TcpClient.make@}.
 
-Putting it all together in an @{Irc@} module:
+On the other way around, we'd like helper functions to send common IRC
+commands (using @{TcpClient.send_string@}. These are trivial:
+
+@$@<IRCSendHelpers@>==@{@-
+let send_cmd t str =
+    Event.TcpClient.send_string t (str ^"\r\n")
+
+let login t ?pass ?username ?realname nick =
+    let username = Option.default nick username
+    and realname = Option.default nick realname in
+    Option.may (fun pass ->
+        send_cmd t ("PASS "^pass))
+        pass ;
+    send_cmd t ("NICK "^nick) ;
+    let hostname = "ignored" and servername = "ignored" in
+    send_cmd t ("USER "^username^" "^hostname^" "^servername^" :"^realname)
+
+let quit ?(reason="Life's boring") t =
+    send_cmd t ("QUIT :"^reason)
+
+(* No support for passwords *)
+let join t channels =
+    send_cmd t ("JOIN "^ String.join "," channels)
+
+let leave t channels =
+    send_cmd t ("PART "^ String.join "," channels)
+
+let topic t ?text channel =
+    send_cmd t ("TOPIC "^channel^ match text with None      -> ""
+                                                | Some text -> " :"^ text)
+
+let tell t receivers text =
+    send_cmd t ("PRIVMSG "^ String.join "," receivers ^" :"^ text)
+@}
+
+Putting it all together in an @{Irc@} module, we can now read and write
+some basic commands.
 
 @O@<irc.ml@>==@{@-
 open Batteries
@@ -139,4 +183,5 @@ open Batteries
 @<IRCMsgParse@>
 @<IRCTests@>
 @<IRCReader@>
+@<IRCSendHelpers@>
 @}

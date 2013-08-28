@@ -46,7 +46,7 @@ language I'm familiar with.
 
 @i event.fw
 @i irc.fw
-@A@<The Plugin API@>
+@i api.fw
 @A@<State@>
 @B@<Persistance@>
 @B@<Oblivion@>
