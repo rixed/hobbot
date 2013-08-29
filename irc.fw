@@ -53,8 +53,8 @@ type msg = string * string * string list list
 It's easy to turn any command string into this type using these regular expressions:
 
 @$@<IRCMsgRegex@>==@{@-
-let msg_re = Str.regexp "\\(:\\([^ \000]+\\) +\\)?\\([^ \000]+\\)\\(.*\\)$"
-let param_re = Str.regexp "\\( +\\(\\([^ \000:][^ \000]\\)\\|\\(:[^ \000]+$\\)\\)\\)"
+let msg_re = Str.regexp "^\\(:\\([^ \000]+\\) +\\)?\\([^: \000][^ \000]*\\)\\(.*\\)$"
+let param_re = Str.regexp "\\( +\\(\\([^ \000:][^ \000]*\\)\\|:\\([^\000]*$\\)\\)\\)"
 @}
 
 Using an implementation such as:
@@ -64,10 +64,10 @@ let parse msg =
     let open Str in
     if not (string_match msg_re msg 0) then
         failwith "Not an IRC message" ;
-    let prefix = try matched_group 1 msg
+    let prefix = try matched_group 2 msg
                  with Not_found -> ""
-    and command = matched_group 2 msg
-    and ofs = group_beginning 3 in
+    and command = matched_group 3 msg
+    and ofs = group_beginning 4 in
     (* Build a list of strings from params *)
     let rec next_param prev ofs =
         if ofs = String.length msg then
@@ -75,13 +75,11 @@ let parse msg =
         else (
             if not (string_match param_re msg ofs) then
                 failwith "Cannot parse msg parameters" ;
-            let param, ofs =
-                try String.nsplit (matched_group 2 msg) ",",
-                    group_end 2
+            let param =
+                try String.nsplit (matched_group 3 msg) ","
                 with Not_found ->
-                    [ matched_group 3 msg ],
-                    group_end 3 in
-            next_param (param :: prev) ofs
+                    [ matched_group 4 msg ] in
+            next_param (param :: prev) (group_end 1)
         )
     in
     prefix, command, next_param [] ofs
@@ -94,17 +92,17 @@ We'd better test this right away with a few messages taken from the RFC:
     (parse "PASS secretpasswordhere") \
         ("", "PASS", [["secretpasswordhere"]])
     (parse ":WiZ NICK Kilroy") \
-        ("WiZ" "NICK", [["Kilroy"]])
+        ("WiZ", "NICK", [["Kilroy"]])
     (parse "USER guest tolmoon tolsun :Ronnie Reagan") \
         ("", "USER", [["guest"]; ["tolmoon"]; ["tolsun"]; ["Ronnie Reagan"]])
     (parse ":tolsun.oulu.fi SERVER csd.bu.edu 5 :BU Central Server") \
-        (":tolsun.oulu.fi", "SERVER", [["csd.bu.edu"]; ["5"]; ["BU Central Server"]])
+        ("tolsun.oulu.fi", "SERVER", [["csd.bu.edu"]; ["5"]; ["BU Central Server"]])
     (parse "QUIT :Gone to have lunch") \
         ("", "QUIT", [["Gone to have lunch"]])
     (parse "QUIT  :") \
-        ("", "QUIT", [])
+        ("", "QUIT", [[""]])
     (parse "JOIN #foo,#bar fubar,foobar") \
-        ("", "QUIT", [["#foo";"#bar"]; ["fubar";"foobar"]])
+        ("", "JOIN", [["#foo";"#bar"]; ["fubar";"foobar"]])
 *)
 @}
 
@@ -115,9 +113,8 @@ let must_fail f x =
     try ignore (f x) ; false
     with _ -> true
 
-(*$T parse & ~printer:dump
+(*$T parse
     must_fail parse ""
-    must_fail parse "Bonga"
     must_fail parse " USER toomanyspace"
     must_fail parse ": USER badprefix"
     must_fail parse "USER no trailing space "
