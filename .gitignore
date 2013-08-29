@@ -2,6 +2,7 @@ event.ml
 irc.ml
 api.ml
 loader.ml
+cli.ml
 *.lis
 *.log
 *.tex
@@ -14,3 +15,5 @@ loader.ml
 *.cma
 *.cmxa
 *.cmxs
+*.byte
+*.opt

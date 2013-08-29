@@ -148,7 +148,9 @@ let load_lib libname =
     if String.exists libname "/../" ||
        String.starts_with libname "../" then
         raise InvalidName ;
-    Dynlink.(loadfile (adapt_filename (!libdir ^"/"^ libname ^".cmo")))
+    let libname = !libdir ^"/"^ libname ^".cmo" in
+    Log.debug "loading library %s" libname ;
+    Dynlink.(loadfile (adapt_filename libname))
 @}
 
 The loaded library can do anything, but is expected to start a new service on

@@ -140,6 +140,7 @@ Such that the select loop itself reduces to:
 let handlers = ref []
 
 let select_loop () =
+    Log.debug "Entering event loop" ;
     while true do
         select_once !handlers
     done

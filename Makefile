@@ -6,15 +6,15 @@ QTEST      = qtest
 top_srcdir = .
 override OCAMLOPTFLAGS += $(INCS) -w Ael -g -annot -I $(top_srcdir)
 override OCAMLFLAGS    += $(INCS) -w Ael -g -annot -I $(top_srcdir)
-REQUIRES = batteries
+REQUIRES = batteries dynlink
 
 .PHONY: clean install uninstall reinstall doc loc
 
-all: hobbot.pdf
+all: hobbot.pdf hobbot.byte
 
 doc: hobbot.pdf hobbot.html
 
-GEN_SOURCES = event.ml irc.ml api.ml loader.ml
+GEN_SOURCES = event.ml irc.ml api.ml loader.ml cli.ml
 
 $(GEN_SOURCES): hobbot.fw
 	fw $(basename $<)
@@ -25,23 +25,19 @@ hobbot.html: $(wildcard *.fw)
 hobbot.tex: $(wildcard *.fw)
 	fw $(basename $@) +t
 
-event.ml: event.fw
-irc.ml: irc.fw
-api.ml: api.fw
-loader.ml: api.fw
-
 api.cmo event.cmo irc.cmo: log.cmo
-irc.cmo api.cmo: event.cmo
-api.cmo: irc.cmo
-loader.cmo: api.cmo
+irc.cmo api.cmo: event.cmo log.cmo
+api.cmo: irc.cmo log.cmo
+cli.cmo: api.cmo irc.cmo event.cmo log.cmo
+loader.cmo: api.cmo log.cmo
 
-.SUFFIXES: .ml .mli .cmo .cmi .cmx .cmxs .opt .byte .tex .dvi .pdf
+hobbot.byte: log.cmo event.cmo irc.cmo api.cmo cli.cmo
+	$(OCAMLC)   -o $@ $(SYNTAX) -package "$(REQUIRES)" -linkpkg $(OCAMLFLAGS) $^
 
-.cmo.byte: $(ARCHIVE)
-	$(OCAMLC)   -o $@ $(SYNTAX) -package "$(REQUIRES)" -ccopt -L$(top_srcdir) $(ARCHIVE) $(EXTRALIBS) -linkpkg $(OCAMLFLAGS) $^
+hobbot.opt:  log.cmx event.cmx irc.cmx api.cmx cli.cmx
+	$(OCAMLOPT) -o $@ $(SYNTAX) -package "$(REQUIRES)" -linkpkg $(OCAMLOPTFLAGS) $^
 
-.cmx.opt: $(XARCHIVE)
-	$(OCAMLOPT) -o $@ $(SYNTAX) -package "$(REQUIRES)" -ccopt -L$(top_srcdir) $(XARCHIVE) $(EXTRALIBS:.cma=.cmxa) -linkpkg $(OCAMLOPTFLAGS) $^
+.SUFFIXES: .ml .mli .cmo .cmi .cmx .cmxs .tex .dvi .pdf
 
 .ml.cmo:
 	$(OCAMLC) $(SYNTAX) -package "$(REQUIRES)" $(OCAMLFLAGS) -c $<
@@ -66,4 +62,4 @@ clean:
 
 loc: $(GEN_SOURCES)
 	@cat $^ | wc -l
-	
+

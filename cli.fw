@@ -1,0 +1,69 @@
+@! vim:sw=4 ts=4 sts=4 expandtab spell spelllang=en
+@p maximum_input_line_length = 999999
+@p maximum_output_line_length = 999999
+
+@A@<Command Line Interface@>
+
+Our needs with regard to command line are limited to saving a few
+parameters such as channels to join and server name into global
+references. Using anything fancier than the standard @{Arg@} module
+to parse the command line would be overkill.
+
+Remember from the previous sections that we have these parameters
+to set:
+
+- @{servername@}, the hostname of the IRC server to connect to
+- @{servicename@}, the port (or service name) to connect to
+- @{nick@}, the nickname of our bot (actual bots will append their service name)
+- @{channels@}, the list of channels to join
+- @{libdir@}, base directory where to read plug-ins from
+
+We also mentioned that one should choose the initial plug-in to load
+from the command line. Let's say we call this list @{plugins@}.
+
+The Arg.parse section to initialize these
+
+@$@<ArgParse@>==@{@-
+Arg.(parse
+    [ "server", Set_string Api.servername,
+                "hostname of the IRC server to connect to" ;
+      "port",   Set_string Api.servicename,
+                "port (or service name) to connect to" ;
+      "nick",   Set_string Api.nick,
+                "base nickname for the bots" ;
+      "chan",   String (prepend Api.channels),
+                "channel to join" ;
+      "libdir", Set_string Api.libdir,
+                "where to load plug-ins from" ]
+    (prepend to_load)
+    "\
+hobbot - marching army of IRC robbots\n\
+\
+hobbot [options] plugin...\n\
+Will load the given plugins, connect the IRC server and join the\n\
+specified channels.\n")
+@}
+
+Where @{prepend@} is:
+
+@$@<Prepend@>==@{@-
+let prepend lst x = lst := x :: !lst
+@}
+
+Given all this there is very few works left for our program main function:
+
+@O@<cli.ml@>==@{@-
+open Batteries
+
+@<Prepend@>
+
+let main =
+    let to_load = ref [] in
+    @<ArgParse@>;
+    (* In case no plugin were asked for explicitly then load the loader *)
+    if !to_load = [] then prepend to_load "loader" ;
+    List.iter Api.load_lib !to_load ;
+    Event.select_loop ()
+@}
+
+And we are done!
