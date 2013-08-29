@@ -1,2 +1,2 @@
 
-let debug fmt = Printf.fprintf stderr fmt
+let debug fmt = Printf.eprintf (fmt^^"\n%!")

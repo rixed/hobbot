@@ -11,7 +11,7 @@ REQUIRES = batteries dynlink
 .PHONY: clean install uninstall reinstall doc loc
 .SUFFIXES: .ml .mli .cmo .cmi .cmx .cmxs .tex .dvi .pdf .fw
 
-all: hobbot.pdf hobbot.byte
+all: hobbot.pdf hobbot.byte loader.cmo
 
 doc: hobbot.pdf hobbot.html
 

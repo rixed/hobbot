@@ -25,22 +25,22 @@ The Arg.parse section to initialize these
 
 @$@<ArgParse@>==@{@-
 Arg.(parse
-    [ "server", Set_string Api.servername,
-                "hostname of the IRC server to connect to" ;
-      "port",   Set_string Api.servicename,
-                "port (or service name) to connect to" ;
-      "nick",   Set_string Api.nick,
-                "base nickname for the bots" ;
-      "chan",   String (prepend Api.channels),
-                "channel to join" ;
-      "libdir", Set_string Api.libdir,
-                "where to load plug-ins from" ]
+    [ "-server", Set_string Api.servername,
+                 "hostname of the IRC server to connect to" ;
+      "-port",   Set_string Api.servicename,
+                 "port (or service name) to connect to" ;
+      "-nick",   Set_string Api.nick,
+                 "base nickname for the bots" ;
+      "-chan",   String (prepend Api.channels),
+                 "channel to join" ;
+      "-libdir", Set_string Api.libdir,
+                 "where to load plug-ins from" ]
     (prepend to_load)
     "\
 hobbot - marching army of IRC robbots\n\
 \
 hobbot [options] plugin...\n\
-Will load the given plugins, connect the IRC server and join the\n\
+Will load the given plugins, connect the IRC server and join the \
 specified channels.\n")
 @}
 
@@ -63,7 +63,7 @@ let main =
     (* In case no plugin were asked for explicitly then load the loader *)
     if !to_load = [] then prepend to_load "loader" ;
     List.iter Api.load_lib !to_load ;
-    Event.select_loop ()
+    Event.loop ()
 @}
 
 And we are done!

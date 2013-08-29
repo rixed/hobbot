@@ -92,9 +92,14 @@ such as OCaml, happen to use too broad types in some places.
 So we need two functions for each event handler: one that return the lists of
 file descriptors to monitor (but to avoid merging lists we will rather pass the
 lists to be completed), and one that accept the lists of readable and writable
-file descriptors and act on it; notice that we keep carrying around the third set
-of file descriptors (the one for exceptional conditions) despite we won't use it
-(this provision for exceptional conditions are largely useless).
+file descriptors and act on it. This function also takes the handler structure
+itself as first argument (not unlike a 'self' method argument); we do so in order
+to be able to unregister this handler, should the processing function decides to
+do so (when reading enf of file for instance).
+
+Notice that @{monitored_files@} is composed of three lists: we keep carrying
+around the third set of file descriptors (the one for exceptional conditions)
+despite we won't use it (exceptional conditions are largely useless).
 
 @$@<EventHandler@>==@{@-
 type fd = Unix.file_descr
@@ -104,7 +109,7 @@ type monitored_files = fd list (* readables *)
                      * fd list (* exceptional conditions *)
 
 type handler = { register_files : monitored_files -> monitored_files ;
-                  process_files : monitored_files -> unit }
+                  process_files : handler -> monitored_files -> unit }
 @}
 
 So that given the list @{handlers@} of such handlers the select loop body is rather short:
@@ -116,7 +121,7 @@ let select_once handlers =
             handler.register_files files)
             ([],[],[]) handlers
     and process_all_monitored_files handlers files =
-        List.iter (fun handler -> handler.process_files files) handlers in
+        List.iter (fun handler -> handler.process_files handler files) handlers in
 
     let open Unix in
     let rfiles, wfiles, efiles = collect_all_monitored_files handlers in
@@ -139,9 +144,9 @@ Such that the select loop itself reduces to:
 
 let handlers = ref []
 
-let select_loop () =
+let loop () =
     Log.debug "Entering event loop" ;
-    while true do
+    while !handlers != [] do
         select_once !handlers
     done
 @}
@@ -193,6 +198,14 @@ let tcp_connect host service =
         with exn ->
             Log.debug "Cannot connect: %s" (Printexc.to_string exn) ;
             None)
+@}
+
+While we are at it, closing might be useful:
+
+@$@<TcpClose@>==@{@-
+let tcp_close t =
+    Log.debug "Closing TCP connection" ;
+    Unix.close t.sock
 @}
 
 We will store this socket into a data structure representing a TCP client.
@@ -250,6 +263,7 @@ module TcpClient =
 struct
     @<TcpClient@>
     @<TcpConnect@>
+    @<TcpClose@>
     @<TcpRegisterFiles@>
     @<TcpWrite@>
 
@@ -261,11 +275,15 @@ struct
                 failwith ("Cannot connect to "^ host ^":"^ service)
 
     let event_handler t reader =
+        let process_files t handler (rfiles, wfiles, _) =
+            (* Only call reader if t.sock is readable *)
+            if List.mem t.sock rfiles then
+                reader t handler ;
+            if List.mem t.sock wfiles then
+                handle_write t
+        in
         { register_files = register_files t ;
-           process_files = fun (rfiles, _, _) ->
-                               (* Only call reader if t.sock is readable *)
-                               if List.mem t.sock rfiles then
-                                   reader t }
+           process_files = process_files t }
 end
 @}
 
@@ -282,12 +300,19 @@ to care about the read buffer:
 
 (* Given a line reading function returns a reader function
    suitable for TcpClient.make *)
-let reader_of_line_reader line_reader t =
+let reader_of_line_reader line_reader t handler =
     let open TcpClient in
     (* Append what can be read from t.sock into rbuf *)
     let str = String.create 1500 in
     let sz = Unix.read t.sock str 0 (String.length str) in
+    (* If we are done, close and unregister *)
+    if sz = 0 then (
+        Log.debug "TCP cnx closed" ;
+        tcp_close t ;
+        unregister handler
+    ) else
     Buffer.add_substring t.rbuf str 0 sz ;
+    Log.debug "read %d bytes (now got %d: '%s')" sz (Buffer.length t.rbuf) (Buffer.contents t.rbuf) ;
     (* Beware that we may have 0, 1 or more lines in rbuf *)
     let rec try_next_line content ofs =
         try let eol = String.find_from content ofs "\r\n" in
