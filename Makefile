@@ -11,12 +11,12 @@ REQUIRES = batteries dynlink
 .PHONY: clean install uninstall reinstall doc loc
 .SUFFIXES: .ml .mli .cmo .cmi .cmx .cmxs .tex .dvi .pdf .fw
 
-all: hobbot.pdf hobbot.byte loader.cmo
+all: hobbot.pdf hobbot.byte loader.cmo bookmaker.cmo
 
 doc: hobbot.pdf hobbot.html
 
-GEN_SOURCES = event.ml irc.ml api.ml loader.ml cli.ml
-ALL_SOURCES = log.ml $(GEN_SOURCES) loader.ml
+GEN_SOURCES = event.ml irc.ml api.ml loader.ml cli.ml bookmaker.ml
+ALL_SOURCES = log.ml $(GEN_SOURCES)
 
 .fw.ml:
 	fw hobbot

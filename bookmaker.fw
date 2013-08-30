@@ -1,0 +1,270 @@
+@! vim:sw=4 ts=4 sts=4 expandtab spell spelllang=en
+@p maximum_input_line_length = 999999
+@p maximum_output_line_length = 999999
+
+@B@<BookMaker@>
+
+Engineers like to gamble, probably because showing your confidence with
+a bet is a good replacement for an argument. But these bets are easily
+forgotten, which is a pity since we like to bet free beers.
+
+What we need is an impartial IRC bot to record the challenges, the predicted
+outcomes and each person stake. Let's formalize it. Given an event E which will
+have a future (numeric) result e (for non numeric events e may identify a
+non numeric result). Then, bets are relations of the form:
+
+Set of nicks a will owe x to set of nicks b if f(e) is false, and the other way
+around otherwise.
+
+Most of the time, the set of gambling nicks will be reduced to just one nick
+but there is no reason to refuse collective debts/gains. Compensations between
+the debts should be possible but optional (again, to maximize beer consumption).
+
+Typically, we will have many such relations on E, so that when e is finally known
+we have many new debts to record.
+
+So the bot must be able to:
+
+- record a new gamble (with a short name and a longer description)
+
+@$@<NewGambling@>==@{@-
+module Gamble = struct
+    type t = { date : float ;
+               name : string ;
+        description : string ;
+    mutable outcome : outcome option }
+    and outcome = int
+
+    let make name description =
+        { date = Unix.time () ;
+          outcome = None ;
+          name ; description }
+
+    @<NewOutcome@>
+end
+@}
+
+- record a new bet (two sets of nicks and what's at stake - quantity and quality -
+  subject to what provision)
+
+@$@<NewBet@>+=@{@-
+module Bet = struct
+    type t = { date : float ;
+             gamble : Gamble.t ;
+          condition : range ;
+              payer : string list ; (* 'payer' pay 'payee' if condition is false *)
+              payee : string list ;
+               what : string ;
+                qtt : int }
+    and range = { min : int option ;
+                  max : int option }
+@}
+
+Given these structures, a bet wins (ie. the payer does *not* pay the payee)
+when the outcome make the condition of the bet true. In other words, the payer
+win:
+
+@$@<NewBet@>+=@{@-
+    let wins bet outcome =
+        Option.map_default (fun min -> outcome >= min) true bet.condition.min &&
+        Option.map_default (fun max -> outcome <  max) true bet.condition.max
+
+    let make_range ?min ?max () = { min ; max }
+    let make gamble ?min ?max payer payee what qtt =
+        { date = Unix.time () ;
+          condition = make_range ?min ?max () ;
+          payer = nicks_sort payer ;
+          payee = nicks_sort payee ;
+          gamble ; what ; qtt }
+end
+@}
+
+Notice that we sort all list of nicks so that we can later use generic comparison operators
+on these lists as they were string sets instead:
+
+@$@<NicksSort@>==@{@-
+let nicks_sort = List.sort String.compare
+@}
+
+- record the outcome of an event
+
+@$@<NewOutcome@>==@{@-
+let set_outcome gamble outcome = gamble.outcome <- Some outcome
+@}
+
+- record what was already paid for (again, two sets of nicks and what was traded)
+
+@$@<NewClear@>==@{@-
+module Pay = struct
+    type t = { date : float ;
+              payer : string list ;
+              payee : string list ;
+               what : string ;
+                qtt : int }
+
+    let make payer payee what qtt =
+        { date = Unix.time () ;
+          payer = nicks_sort payer ;
+          payee = nicks_sort payee ;
+          what ; qtt }
+end
+@}
+
+We do not have to keep a running account of each nick debts since we can
+compute from this the current situation of every involved nick; although
+history compression will still be possible (under the form "nicks a owe x to
+nicks b from previous gamblings").
+
+The functions we need to be able to perform on our database of records are: to
+find a gamble by name, to list pending gambles (those with no outcome yet) so
+that users can place new bets, to list current pending debts and to record (and
+check) a new refund.
+
+Later, we may want to be also able to compute any nick account, compute a nick
+credibility (out of previous wins and losses).
+
+From these requirements, we want a hash for the gamble (indexed by name),
+and for each gamble a list of bets. Aside from that, we also keep record of
+all refunds. Everything is stored in a single @{database@} record so that
+it's easier to (un)marshal.
+
+@$@<Database@>+=@{
+type database = { gambles : (string, gamble_record) Hashtbl.t ;
+          mutable refunds : Pay.t list }
+and gamble_record = { gamble : Gamble.t ;
+                mutable bets : Bet.t list }
+
+let make_empty_database () =
+    { gambles = Hashtbl.create 11 ;
+      refunds = [] }
+
+let database =
+    try File.with_file_in "gambles.db" Marshal.input
+    with Sys_error _ -> make_empty_database ()
+@}
+
+With these data structure our required functions are trivial:
+
+@$@<Database@>+=@{
+let find_gamble g = Hashtbl.find_option database.gambles g
+
+let find_pending_gambles () =
+    Hashtbl.fold (fun _name record lst ->
+        if record.gamble.Gamble.outcome = None then record.gamble::lst else lst)
+        database.gambles []
+
+let pending_debts compensate =
+    (* list of all debts *)
+    let debts = Hashtbl.create 11 in (* hash of (payer*payee)->qtt list of due quantities indexed on what is due *)
+    let rec owe compensate what qtt payer payee =
+        if compensate && payer > payee then (
+            owe false what (-qtt) payee payer
+        ) else (
+            Hashtbl.modify_opt what (function
+                | None ->
+                    let h = Hashtbl.create 7 in
+                    Hashtbl.add h (payer,payee) qtt ;
+                    Some h
+                | Some dues as x ->
+                    Hashtbl.modify_opt (payer,payee) (function
+                        | None -> Some qtt
+                        | Some qtt' -> Some (qtt+qtt'))
+                        dues ;
+                    x)
+                debts
+        ) in
+    Hashtbl.iter (fun _name record ->
+        Option.may (fun outcome ->
+            List.iter (fun bet ->
+                let open Bet in
+                if wins bet outcome then (* payer win its bet against payee *)
+                    owe compensate bet.what bet.qtt bet.payee bet.payer
+                else
+                    owe compensate bet.what bet.qtt bet.payer bet.payee)
+                record.bets)
+            record.gamble.Gamble.outcome)
+        database.gambles ;
+    (* build a list of debts *)
+    Hashtbl.fold (fun what dues lst ->
+        Hashtbl.fold (fun (payer,payee) qtt lst ->
+            (what,qtt,payer,payee) :: lst)
+            dues lst)
+        debts []
+
+let pay payer payee what qtt =
+    (* First, compute the total qtt owed payer payer payee payee *)
+    let owed_qtt =
+        Hashtbl.fold (fun _name record qtt ->
+            Option.map_default (fun outcome ->
+                List.fold_left (fun qtt bet ->
+                    let open Bet in
+                    if bet.what = what && (
+                        (wins bet outcome && payer = bet.payee && payee = bet.payer) ||
+                        (payer = bet.payer && payee = bet.payer)
+                    ) then
+                        qtt + bet.qtt
+                    else qtt)
+                    qtt record.bets)
+                qtt record.gamble.Gamble.outcome)
+            database.gambles 0 in
+    if owed_qtt < qtt then
+        failwith ("amount actually owed: "^ string_of_int owed_qtt) ;
+    (* All is well, place the refund *)
+    let refund = Pay.make payer payee what qtt in
+    database.refunds <- refund :: database.refunds
+@}
+
+Now, how do we interact with this bot? It all starts like the loader callback:
+
+@$@<Gambling@>==@{@-
+let nicks_print fmt lst =
+    List.print String.print fmt lst
+
+let on_msg_to_bookmaker ~priv state dst msg =
+    let open Str in
+    if priv then Api.react_to_msg state msg [
+        regexp "^ *help *$", (fun () ->
+            Irc.tell state.tcp [dst] "See my internals at https://github.com/rixed/hobbot") ;
+        regexp "^ *\\(.*\\bcompens.+ +\\)?\\(status\\|debts\\)\\( +.*\\bcompens.*\\)? *$", (fun () ->
+            let found_group n =
+                try ignore (group_beginning n) ; true
+                with Not_found -> false in
+            let compensate = found_group 1 || found_group 3 in
+            let say_debt (what,qtt,payer,payee) =
+                let os = IO.output_string () in
+                Printf.fprintf os "%a owe %d %s to %a"
+                    nicks_print payer
+                    qtt what
+                    nicks_print payee ;
+                IO.close_out os |>
+                Irc.tell state.tcp [dst] in
+            pending_debts compensate |>
+            List.iter say_debt) ]
+@}
+
+In order not to repeat the gamble in almost every command, we will have a
+"topic" gamble, that's being implicitly completed. Of course this topic can be
+change to a pending or even a new gamble, and a list of pending gambles can be
+asked for.
+
+
+With almost the same @{init@} function than the @{loader@} bot:
+
+@O@<bookmaker.ml@>==@{@-
+open Batteries
+
+@<NicksSort@>
+@<NewGambling@>
+@<NewBet@>
+@<NewClear@>
+@<Database@>
+
+open Api
+@<Gambling@>
+
+let init =
+    start ~servername:!servername
+          ~servicename:!servicename
+          ~nick:(!nick ^"-bookmaker")
+          !channels on_msg_to_bookmaker
+@}
