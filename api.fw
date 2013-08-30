@@ -214,7 +214,13 @@ arguments but I feel they belongs there.
 
 @$@<CmdLineParams@>+=@{@-
 let servername = ref "irc.freenode.org"
-let servicename = ref "irc"
+let servicename = ref "6667"
+@}
+
+Yes, there is a service named "irc", but no, IRC servers do not use it. IRC
+is so acurately specified that even the port number is unreliable.
+
+@$@<CmdLineParams@>+=@{@-
 let nick = ref "hobbot"
 let channels = ref ["#hobbot"]
 @}
