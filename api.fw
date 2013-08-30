@@ -159,24 +159,32 @@ its own.
 So let's code this first bot which service is to spawn new services
 (of course this service will be started automatically otherwise we will have
 kind of a chicken and egg problem). Remember that a service is actually defined
-by it's @{on_msg@} callback:
+by it's @{on_msg@} callback. Most often than not, this callback will react
+to some predefined regular expressions, so let's first implement a small helper
+receiving a list of regexp and functions, and trying all regular expressions in
+turn until one match. This is not unlike @{Arg.parse@}:
+
+@$@<BotHelper@>==@{@-
+let rec react_to_msg state msg = function
+    | [] -> Log.debug "Ignoring msg '%s'" msg
+    | (re, action)::rest ->
+        if Str.string_match re msg 0 then action ()
+        else react_to_msg state msg rest
+@}
+
+Using this helper the @{on_msg@} function of loader reduce to:
 
 @$@<ServiceLoader@>+=@{@-
-let on_msg_to_loader =
+let on_msg_to_loader ~priv state dst msg =
     let open Str in
-    let help_re = regexp "^ *help *$"
-    and load_re = regexp "^ *load *\\(.*\\) *$" in
-    fun ~priv state dst msg ->
-        if priv then (
-            if string_match help_re msg 0 then (
-                Irc.tell state.tcp [dst] "help... yourself"
-            ) else if string_match load_re msg 0 then (
-                let libname = matched_group 1 msg in
-                let result = try load_lib libname ; "loaded"
-                             with _ -> "fail" in
-                Irc.tell state.tcp [dst] result
-            )
-        )
+    if priv then Api.react_to_msg state msg [
+        regexp "^ *help *$", (fun () ->
+            Irc.tell state.tcp [dst] "See my internals at https://github.com/rixed/hobbot") ;
+        regexp "^ *load *\\(.*\\) *$", (fun () ->
+            let libname = matched_group 1 msg in
+            let result = try load_lib libname ; "loaded"
+                         with _ -> "fail" in
+            Irc.tell state.tcp [dst] result) ]
 @}
 
 So we can regroup everything for the library into the @{api@} module:
@@ -187,6 +195,7 @@ open Batteries
 @<CmdLineParams@>
 @<APIState@>
 @<LoadingLib@>
+@<BotHelper@>
 @}
 
 and then everything for our loading service into a @{loader@} module,
