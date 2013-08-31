@@ -27,37 +27,59 @@ So the bot must be able to:
 
 - record a new gamble (with a short name and a longer description)
 
+@$@<NewGamblingTypes@>+=@{@-
+type t = { date : float ;
+           name : string ;
+    description : string ;
+mutable outcome : outcome option ;
+   mutable bets : bet list }
+and outcome = int
+@}
+
 @$@<NewGambling@>==@{@-
 module Gamble = struct
-    type t = { date : float ;
-               name : string ;
-        description : string ;
-    mutable outcome : outcome option }
-    and outcome = int
+    @<NewGamblingTypes@>
 
     let make name description =
         { date = Unix.time () ;
-          outcome = None ;
+          outcome = None ; bets = [] ;
           name ; description }
 
     @<NewOutcome@>
+    @<NewBet@>
 end
 @}
 
 - record a new bet (two sets of nicks and what's at stake - quantity and quality -
   subject to what provision)
 
+@$@<NewGamblingTypes@>+=@{@-
+and bet = { payer : string list ; (* 'payer' pay 'payee' if condition is false *)
+            payee : string list ;
+        condition : range ;
+             what : string ;
+              qtt : int }
+and range = { min : int option ;
+              max : int option }
+@}
+
 @$@<NewBet@>+=@{@-
-module Bet = struct
-    type t = { date : float ;
-             gamble : Gamble.t ;
-          condition : range ;
-              payer : string list ; (* 'payer' pay 'payee' if condition is false *)
-              payee : string list ;
-               what : string ;
-                qtt : int }
-    and range = { min : int option ;
-                  max : int option }
+    let make_range ?min ?max () = { min ; max }
+    let make_bet gamble ?min ?max payer payee what qtt =
+        let bet =
+            { condition = make_range ?min ?max () ;
+              payer = nicks_sort payer ;
+              payee = nicks_sort payee ;
+              what ; qtt } in
+        gamble.bets <- bet :: gamble.bets
+@}
+
+With a few accompagnying functions:
+
+@$@<NewBet@>+=@{@-
+let string_of_bound = function
+    | None -> ""
+    | Some x -> string_of_int x
 @}
 
 Given these structures, a bet wins (ie. the payer does *not* pay the payee)
@@ -68,15 +90,6 @@ win:
     let wins bet outcome =
         Option.map_default (fun min -> outcome >= min) true bet.condition.min &&
         Option.map_default (fun max -> outcome <  max) true bet.condition.max
-
-    let make_range ?min ?max () = { min ; max }
-    let make gamble ?min ?max payer payee what qtt =
-        { date = Unix.time () ;
-          condition = make_range ?min ?max () ;
-          payer = nicks_sort payer ;
-          payee = nicks_sort payee ;
-          gamble ; what ; qtt }
-end
 @}
 
 Notice that we sort all list of nicks so that we can later use generic comparison operators
@@ -95,7 +108,7 @@ let set_outcome gamble outcome = gamble.outcome <- Some outcome
 - record what was already paid for (again, two sets of nicks and what was traded)
 
 @$@<NewClear@>==@{@-
-module Pay = struct
+module Payment = struct
     type t = { date : float ;
               payer : string list ;
               payee : string list ;
@@ -116,9 +129,9 @@ history compression will still be possible (under the form "nicks a owe x to
 nicks b from previous gamblings").
 
 The functions we need to be able to perform on our database of records are: to
-find a gamble by name, to list pending gambles (those with no outcome yet) so
-that users can place new bets, to list current pending debts and to record (and
-check) a new refund.
+add a gamble, to find a gamble by name, to list pending gambles (those with no
+outcome yet) so that users can place new bets, to place a bet on a pending
+gamble, to list current pending debts and to record (and check) a new refund.
 
 Later, we may want to be also able to compute any nick account, compute a nick
 credibility (out of previous wins and losses).
@@ -128,11 +141,9 @@ and for each gamble a list of bets. Aside from that, we also keep record of
 all refunds. Everything is stored in a single @{database@} record so that
 it's easier to (un)marshal.
 
-@$@<Database@>+=@{
-type database = { gambles : (string, gamble_record) Hashtbl.t ;
-          mutable refunds : Pay.t list }
-and gamble_record = { gamble : Gamble.t ;
-                mutable bets : Bet.t list }
+@$@<Database@>+=@{@-
+type database = { gambles : (string, Gamble.t) Hashtbl.t ;
+          mutable refunds : Payment.t list }
 
 let make_empty_database () =
     { gambles = Hashtbl.create 11 ;
@@ -143,14 +154,29 @@ let database =
     with Sys_error _ -> make_empty_database ()
 @}
 
-With these data structure our required functions are trivial:
+Also, in order not to repeat the gamble name in almost every command, we will
+have a current, "on topic", gamble. This topic should be automatically set to
+last mentioned gamble name.
+
+@$@<Database@>+=@{@-
+let current_gamble = ref None
+
+let set_topic g = current_gamble := Some g
+@}
+
+With these data structures in place our required functions are trivial:
 
 @$@<Database@>+=@{
+let add_gamble name descr =
+    let gamble = Gamble.make name descr in
+    Hashtbl.add database.gambles name gamble ;
+    set_topic gamble
+
 let find_gamble g = Hashtbl.find_option database.gambles g
 
 let pending_gambles () =
-    Hashtbl.fold (fun _name record lst ->
-        if record.gamble.Gamble.outcome = None then record.gamble::lst else lst)
+    Hashtbl.fold (fun _name gamble lst ->
+        if gamble.Gamble.outcome = None then gamble::lst else lst)
         database.gambles []
 
 let pending_debts compensate =
@@ -173,48 +199,49 @@ let pending_debts compensate =
                     x)
                 debts
         ) in
-    Hashtbl.iter (fun _name record ->
+    Hashtbl.iter (fun _name gamble ->
+        let open Gamble in
         Option.may (fun outcome ->
             List.iter (fun bet ->
-                let open Bet in
                 if wins bet outcome then (* payer win its bet against payee *)
                     owe compensate bet.what bet.qtt bet.payee bet.payer
                 else
                     owe compensate bet.what bet.qtt bet.payer bet.payee)
-                record.bets)
-            record.gamble.Gamble.outcome)
+                gamble.bets)
+            gamble.outcome)
         database.gambles ;
+    (* Now compensate these debits with the refunds *)
+    List.iter (fun pay ->
+        let open Payment in
+        owe true pay.what pay.qtt pay.payee pay.payer)
+        database.refunds ;
     (* build a list of debts *)
     Hashtbl.fold (fun what dues lst ->
         Hashtbl.fold (fun (payer,payee) qtt lst ->
+            if qtt = 0 then lst else
             (what,qtt,payer,payee) :: lst)
             dues lst)
         debts []
 
 let pay payer payee what qtt =
-    (* First, compute the total qtt owed payer payer payee payee *)
+    (* check it corresponds to a debts *)
+    let debts = pending_debts false in
+    (* we accept any qtt smaller than total owed *)
     let owed_qtt =
-        Hashtbl.fold (fun _name record qtt ->
-            Option.map_default (fun outcome ->
-                List.fold_left (fun qtt bet ->
-                    let open Bet in
-                    if bet.what = what && (
-                        (wins bet outcome && payer = bet.payee && payee = bet.payer) ||
-                        (payer = bet.payer && payee = bet.payer)
-                    ) then
-                        qtt + bet.qtt
-                    else qtt)
-                    qtt record.bets)
-                qtt record.gamble.Gamble.outcome)
-            database.gambles 0 in
+        List.fold_left (fun owed (what',qtt',payer',payee') ->
+            if what = what' && payer = payer' && payee = payee' then
+                owed + qtt'
+            else owed)
+            0 debts in
     if owed_qtt < qtt then
-        failwith ("amount actually owed: "^ string_of_int owed_qtt) ;
+        failwith ("amount of "^ what ^" actually owed: "^ string_of_int owed_qtt) ;
     (* All is well, place the refund *)
-    let refund = Pay.make payer payee what qtt in
+    let refund = Payment.make payer payee what qtt in
     database.refunds <- refund :: database.refunds
 @}
 
-Now, how do we interact with this bot? It all starts like the loader callback:
+Let's now use them to implement the bot itself, starting with a few
+definition and utilities:
 
 @$@<Gambling@>+=@{@-
 let nicks_print fmt lst =
@@ -226,8 +253,12 @@ let string_of_ts f =
     let open Unix in
     let tm = localtime f in
     Printf.sprintf "%04d-%02d-%02d" (tm.tm_year+1900) (tm.tm_mon+1) tm.tm_mday
+@}
 
-let on_msg_to_bookmaker ~priv state dst msg =
+Then the main piece of code, the function that react to incoming orders:
+
+@$@<Gambling@>+=@{@-
+let on_msg_to_bookmaker ~priv state src dst msg =
     let open Str in
     if priv then Api.react_to_msg state msg [
         regexp "^help$", (fun () ->
@@ -257,6 +288,56 @@ let on_msg_to_bookmaker ~priv state dst msg =
             match pending_gambles () with
             | []  -> Irc.tell state.tcp [dst] "No pending gambles"
             | lst -> List.iter say_gamble lst) ;
+        regexp "^gamble +\\([^ ]+\\)\\( +\\(.*\\)\\)?", (fun () ->
+            let name = matched_group 1 msg
+            and descr = try matched_group 3 msg with Not_found -> "" in
+            add_gamble name descr ;
+            Irc.tell state.tcp [dst] ("Accepting bets for "^name)) ;
+        regexp "^bet +\\([0-9]+\\) +\\(.*[^s]\\)s? +with +\\([^ ]+\\) +on +\\(-?[0-9]+\\)?\\.\\.\\(-?[0-9]+\\)?$", (fun () ->
+            let qtt = matched_group 1 msg |> int_of_string
+            and what = matched_group 2 msg
+            and payee = matched_group 3 msg |> String.nsplit ~by:","
+            and min = try Some (matched_group 4 msg |> int_of_string) with Not_found -> None
+            and max = try Some (matched_group 5 msg |> int_of_string) with Not_found -> None in
+            match !current_gamble with
+            | None -> Irc.tell state.tcp [dst] "What are we gambling on?"
+            | Some g ->
+                let open Gamble in
+                (match g.outcome with
+                | None ->
+                    (* Can place new bets *)
+                    make_bet g ?min ?max [src] payee what qtt ;
+                    Printf.sprintf "%s will pay %d %s to %s if outcome of %s is not within %s..%s"
+                        src qtt what (matched_group 3 msg) g.name
+                        (string_of_bound min) (string_of_bound max) |>
+                    Irc.tell state.tcp [dst]
+                | Some outcome ->
+                    Printf.sprintf "We already know %s outcome (%d)"
+                        g.name outcome |>
+                    Irc.tell state.tcp [dst])) ;
+        regexp "^\\(outcome\\|result\\)[^0-9-]*\\(-?[0-9]+\\)$", (fun () ->
+            match !current_gamble with
+            | None -> Irc.tell state.tcp [dst] "What were we gambling on?"
+            | Some g ->
+                (match g.Gamble.outcome with
+                | None ->
+                    let outcome = matched_group 2 msg |> int_of_string in
+                    Gamble.set_outcome g outcome ;
+                    Irc.tell state.tcp [dst] "Ok"
+                | Some outcome ->
+                    Printf.sprintf "Outcome of %s is already known (%d)"
+                        g.Gamble.name outcome |>
+                    Irc.tell state.tcp [dst])) ;
+        regexp "^\\([^ ]+\\)?\\(pay\\|refund\\)\\(ed\\)? +\\([0-9]+\\) +\\(.*[^s]\\)s? +to +\\([^ ]+\\)$", (fun () ->
+            let payer = try matched_group 1 msg |> String.nsplit ~by:","
+                        with Not_found -> [src]
+            and qtt   = matched_group 4 msg |> int_of_string
+            and what  = matched_group 5 msg
+            and payee = matched_group 6 msg |> String.nsplit ~by:"," in
+            try pay payer payee what qtt ;
+                Irc.tell state.tcp [dst] "Ok"
+            with Failure str ->
+                Irc.tell state.tcp [dst] ("Cant do that: "^str)) ;
         regexp "", (fun () -> Irc.tell state.tcp [dst] "Are you talking to me?!") ]
 @}
 
@@ -272,16 +353,23 @@ Beware! Regular expressions spotted! Get your tests ready:
               wbuf = Buffer.create 500 } in
         Api.make_empty_state tcp in
     let state = mock_state () in
-    let test msg_in msg_out =
-        on_msg_to_bookmaker ~priv:true state "#somechan" msg_in ;
+    let actual_out ?(src="") msg_in =
+        on_msg_to_bookmaker ~priv:true state src "#somechan" msg_in ;
         let actual_out =
             try Buffer.contents state.Api.tcp.wbuf |>
                 String.split ~by:":" |> snd |>
                 String.trim
             with Not_found -> "No answer!?" in
         Buffer.clear state.Api.tcp.wbuf ;
+        actual_out in
+    let test ?src msg_in msg_out =
         assert_equal ~printer:identity ~msg:(msg_in^"->"^msg_out)
-            msg_out actual_out in
+            msg_out (actual_out ?src msg_in) in
+    let check ?src msg_in f =
+        let actual_out = actual_out ?src msg_in in
+        assert_bool ("Bad output: '"^actual_out^"'") (f actual_out) in
+    let starts_with ?src msg_in start =
+        check ?src msg_in ((flip String.starts_with) start) in
     (* Check we answer help *)
     test "help" help ;
     (* At first every accounts are clear *)
@@ -289,14 +377,22 @@ Beware! Regular expressions spotted! Get your tests ready:
     test "accounts with compensations" "Good accounts make good friends" ;
     test "compensated accounts" "Good accounts make good friends" ;
     (* And there are no pending gambles *)
-    test "pendings" "No pending gambles"
+    test "pendings" "No pending gambles" ;
+    (* Let's start *)
+    test "gamble FasterLanguage Ocaml code runs n% faster than Go" "Accepting bets for FasterLanguage" ;
+    starts_with "pendings" "[FasterLanguage] Ocaml code" ;
+    (* And place some bets *)
+    starts_with ~src:"rixed" "bet 1 beer with jim on 50.." "rixed will pay 1 beer to jim" ;
+    starts_with ~src:"joe"   "bet 2 beers with rixed on ..-1" "joe will pay 2 beer" ;
+    (* Set outcome *)
+    test "outcome 100" "Ok" ;
+    test ~src:"jim" "payed 1 beer to rixed" "Ok" ;
+    test ~src:"joe" "payed 1 beer to rixed" "Ok" ;
+    test "accounts" "[joe] owe 1 beer to [rixed]" ;
+    test ~src:"joe" "payed 1 beer to rixed" "Ok" ;
+    test "accounts" "Good accounts make good friends"
 *)
 @}
-
-In order not to repeat the gamble in almost every command, we will have a
-"topic" gamble, that's being implicitly completed. Of course this topic can be
-change to a pending or even a new gamble, and a list of pending gambles can be
-asked for.
 
 We have to take care to split the initialization of the bot (which connects
 to IRC server as a side effect) from the rest of its code (that we regroup in
@@ -308,7 +404,6 @@ open Batteries
 
 @<NicksSort@>
 @<NewGambling@>
-@<NewBet@>
 @<NewClear@>
 @<Database@>
 
@@ -316,7 +411,8 @@ open Api
 @<Gambling@>
 @}
 
-With almost the same @{init@} function than the @{loader@} bot:
+Time to conclude this bot that's too long already with almost the same @{init@}
+function than the @{loader@} bot:
 
 @O@<bookmaker.ml@>==@{@-
 open Bookmaker_lib

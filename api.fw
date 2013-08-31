@@ -78,13 +78,13 @@ let start ~servername ~servicename
         | _, "353", [_; _; [chn]; [nicks]] ->
             Log.debug "Received NAMREPLY for channel %s, nicks: %s" chn nicks ;
             add_users state chn (String.nsplit nicks " ")
-        | _, "PRIVMSG", [dsts; [msg]] ->
+        | src, "PRIVMSG", [dsts; [msg]] ->
             Log.debug "Received PRIVMSG: %s" msg ;
             let priv, msg = msg_to_me msg in
             let msg = String.trim msg in
             List.iter (fun dst ->
                 let priv = priv || dst = nick in
-                on_msg ~priv state dst msg) dsts
+                on_msg ~priv state src dst msg) dsts
         | _, cmd, _ ->
             Log.debug "Ignoring command %s" cmd in
     (* Establish TCP connection *)
@@ -176,7 +176,7 @@ let rec react_to_msg state msg = function
 Using this helper the @{on_msg@} function of loader reduce to:
 
 @$@<ServiceLoader@>+=@{@-
-let on_msg_to_loader ~priv state dst msg =
+let on_msg_to_loader ~priv state _src dst msg =
     let open Str in
     if priv then Api.react_to_msg state msg [
         regexp "^help$", (fun () ->
