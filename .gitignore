@@ -2,6 +2,8 @@ event.ml
 irc.ml
 api.ml
 loader.ml
+bookmaker.ml
+bookmaker_lib.ml
 cli.ml
 *.lis
 *.log
