@@ -1,6 +1,7 @@
 # vim:filetype=make
 OCAMLC     = ocamlfind ocamlc
 OCAMLOPT   = ocamlfind ocamlopt
+OCAMLDEP   = ocamlfind ocamldep
 TEX        = tex
 QTEST      = qtest
 top_srcdir = .
@@ -32,14 +33,11 @@ hobbot.html: $(wildcard *.fw)
 hobbot.tex: $(wildcard *.fw)
 	fw hobbot +t
 
-# TODO: use ocamldep on $(ALL_SOURCES) for that
-api.cmo event.cmo irc.cmo: log.cmo
-irc.cmo api.cmo: event.cmo log.cmo
-api.cmo: irc.cmo log.cmo
-cli.cmo: api.cmo irc.cmo event.cmo log.cmo
-loader.cmo: api.cmo log.cmo
-bookmaker.cmo: api.cmo log.cmo bookmaker_lib.cmo
-bookmaker_lib.cmo: api.cmo log.cmo
+# We'd be glad to depend on *.ml but ocamldep is so slow...
+# Use "make -B depend" when you know you changed dependancies.
+depend:
+	$(OCAMLDEP) $(SYNTAX) -package "$(REQUIRES)" *.ml > $@
+include depend
 
 hobbot.byte: log.cmo event.cmo irc.cmo api.cmo cli.cmo
 	$(OCAMLC)   -o $@ $(SYNTAX) -package "$(REQUIRES)" -linkpkg $(OCAMLFLAGS) $^
@@ -66,7 +64,7 @@ hobbot.opt:  log.cmx event.cmx irc.cmx api.cmx cli.cmx
 	dvipdf $< $@
 
 clean:
-	@rm -f *.cm[ioxa] *.cmx[as] *.[aso] *.byte *.opt *.annot *.lis *.tex *.pdf *.dvi *.log *.html $(GEN_SOURCES) all_tests.ml
+	@$(RM) -f *.cm[ioxa] *.cmx[as] *.[aso] *.byte *.opt *.annot *.lis *.tex *.pdf *.dvi *.log *.html $(GEN_SOURCES) all_tests.ml depend
 
 loc: $(GEN_SOURCES) log.ml
 	@cat $^ | wc -l

@@ -1,0 +1,16 @@
+api.cmo : log.cmo irc.cmo event.cmo
+api.cmx : log.cmx irc.cmx event.cmx
+bookmaker.cmo : bookmaker_lib.cmo api.cmo
+bookmaker.cmx : bookmaker_lib.cmx api.cmx
+bookmaker_lib.cmo : irc.cmo api.cmo
+bookmaker_lib.cmx : irc.cmx api.cmx
+cli.cmo : event.cmo api.cmo
+cli.cmx : event.cmx api.cmx
+event.cmo : log.cmo
+event.cmx : log.cmx
+irc.cmo : event.cmo
+irc.cmx : event.cmx
+loader.cmo : irc.cmo api.cmo
+loader.cmx : irc.cmx api.cmx
+log.cmo :
+log.cmx :
