@@ -81,6 +81,7 @@ let start ~servername ~servicename
         | _, "PRIVMSG", [dsts; [msg]] ->
             Log.debug "Received PRIVMSG: %s" msg ;
             let priv, msg = msg_to_me msg in
+            let msg = String.trim msg in
             List.iter (fun dst ->
                 let priv = priv || dst = nick in
                 on_msg ~priv state dst msg) dsts
@@ -178,9 +179,9 @@ Using this helper the @{on_msg@} function of loader reduce to:
 let on_msg_to_loader ~priv state dst msg =
     let open Str in
     if priv then Api.react_to_msg state msg [
-        regexp "^ *help *$", (fun () ->
+        regexp "^help$", (fun () ->
             Irc.tell state.tcp [dst] "See my internals at https://github.com/rixed/hobbot") ;
-        regexp "^ *load *\\(.*\\) *$", (fun () ->
+        regexp "^load *\\(.*\\)$", (fun () ->
             let libname = matched_group 1 msg in
             let result = try load_lib libname ; "loaded"
                          with _ -> "fail" in

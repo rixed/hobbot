@@ -15,13 +15,15 @@ all: hobbot.pdf hobbot.byte loader.cmo bookmaker.cmo
 
 doc: hobbot.pdf hobbot.html
 
-GEN_SOURCES = event.ml irc.ml api.ml loader.ml cli.ml bookmaker.ml
+GEN_SOURCES = event.ml irc.ml api.ml loader.ml cli.ml bookmaker_lib.ml bookmaker.ml
 ALL_SOURCES = log.ml $(GEN_SOURCES)
 
 .fw.ml:
 	fw hobbot
 
 loader.ml: api.fw
+	fw hobbot
+bookmaker_lib.ml: bookmaker.fw
 	fw hobbot
 
 hobbot.html: $(wildcard *.fw)
@@ -36,6 +38,8 @@ irc.cmo api.cmo: event.cmo log.cmo
 api.cmo: irc.cmo log.cmo
 cli.cmo: api.cmo irc.cmo event.cmo log.cmo
 loader.cmo: api.cmo log.cmo
+bookmaker.cmo: api.cmo log.cmo bookmaker_lib.cmo
+bookmaker_lib.cmo: api.cmo log.cmo
 
 hobbot.byte: log.cmo event.cmo irc.cmo api.cmo cli.cmo
 	$(OCAMLC)   -o $@ $(SYNTAX) -package "$(REQUIRES)" -linkpkg $(OCAMLFLAGS) $^
@@ -72,7 +76,7 @@ loc: $(GEN_SOURCES) log.ml
 # Tests with qtest
 
 # Note: do NOT include in there module which initer connects to IRC!
-TEST_SOURCES = log.ml event.ml irc.ml api.ml
+TEST_SOURCES = log.ml event.ml irc.ml api.ml bookmaker_lib.ml
 all_tests.byte: $(TEST_SOURCES:.ml=.cmo) all_tests.ml
 	$(OCAMLC)   -o $@ $(SYNTAX) -package "$(REQUIRES) QTest2Lib" -linkpkg $(OCAMLFLAGS) -w -33 $^
 

@@ -148,7 +148,7 @@ With these data structure our required functions are trivial:
 @$@<Database@>+=@{
 let find_gamble g = Hashtbl.find_option database.gambles g
 
-let find_pending_gambles () =
+let pending_gambles () =
     Hashtbl.fold (fun _name record lst ->
         if record.gamble.Gamble.outcome = None then record.gamble::lst else lst)
         database.gambles []
@@ -216,16 +216,23 @@ let pay payer payee what qtt =
 
 Now, how do we interact with this bot? It all starts like the loader callback:
 
-@$@<Gambling@>==@{@-
+@$@<Gambling@>+=@{@-
 let nicks_print fmt lst =
     List.print String.print fmt lst
+
+let help = "See my internals at https://github.com/rixed/hobbot"
+
+let string_of_ts f =
+    let open Unix in
+    let tm = localtime f in
+    Printf.sprintf "%04d-%02d-%02d" (tm.tm_year+1900) (tm.tm_mon+1) tm.tm_mday
 
 let on_msg_to_bookmaker ~priv state dst msg =
     let open Str in
     if priv then Api.react_to_msg state msg [
-        regexp "^ *help *$", (fun () ->
-            Irc.tell state.tcp [dst] "See my internals at https://github.com/rixed/hobbot") ;
-        regexp "^ *\\(.*\\bcompens.+ +\\)?\\(status\\|debts\\)\\( +.*\\bcompens.*\\)? *$", (fun () ->
+        regexp "^help$", (fun () ->
+            Irc.tell state.tcp [dst] help) ;
+        regexp "^\\(.*\\bcompens.+ +\\)?\\(accounts\\|debts\\)\\( +.*\\bcompens.*\\)?$", (fun () ->
             let found_group n =
                 try ignore (group_beginning n) ; true
                 with Not_found -> false in
@@ -238,8 +245,52 @@ let on_msg_to_bookmaker ~priv state dst msg =
                     nicks_print payee ;
                 IO.close_out os |>
                 Irc.tell state.tcp [dst] in
-            pending_debts compensate |>
-            List.iter say_debt) ]
+            match pending_debts compensate with
+            | []  -> Irc.tell state.tcp [dst] "Good accounts make good friends"
+            | lst -> List.iter say_debt lst) ;
+        regexp "^pendings?", (fun () ->
+            let say_gamble g =
+                let open Gamble in
+                Printf.sprintf "[%s] %s (%s)"
+                    g.name g.description (string_of_ts g.date) |>
+                Irc.tell state.tcp [dst] in
+            match pending_gambles () with
+            | []  -> Irc.tell state.tcp [dst] "No pending gambles"
+            | lst -> List.iter say_gamble lst) ;
+        regexp "", (fun () -> Irc.tell state.tcp [dst] "Are you talking to me?!") ]
+@}
+
+Beware! Regular expressions spotted! Get your tests ready:
+
+@$@<Gambling@>+=@{@-
+(*$R on_msg_to_bookmaker
+    let open Event.TcpClient in
+    let mock_state () =
+        let tcp =
+            { sock = Unix.stdout ;
+              rbuf = Buffer.create 0 ;
+              wbuf = Buffer.create 500 } in
+        Api.make_empty_state tcp in
+    let state = mock_state () in
+    let test msg_in msg_out =
+        on_msg_to_bookmaker ~priv:true state "#somechan" msg_in ;
+        let actual_out =
+            try Buffer.contents state.Api.tcp.wbuf |>
+                String.split ~by:":" |> snd |>
+                String.trim
+            with Not_found -> "No answer!?" in
+        Buffer.clear state.Api.tcp.wbuf ;
+        assert_equal ~printer:identity ~msg:(msg_in^"->"^msg_out)
+            msg_out actual_out in
+    (* Check we answer help *)
+    test "help" help ;
+    (* At first every accounts are clear *)
+    test "accounts" "Good accounts make good friends" ;
+    test "accounts with compensations" "Good accounts make good friends" ;
+    test "compensated accounts" "Good accounts make good friends" ;
+    (* And there are no pending gambles *)
+    test "pendings" "No pending gambles"
+*)
 @}
 
 In order not to repeat the gamble in almost every command, we will have a
@@ -247,10 +298,12 @@ In order not to repeat the gamble in almost every command, we will have a
 change to a pending or even a new gamble, and a list of pending gambles can be
 asked for.
 
+We have to take care to split the initialization of the bot (which connects
+to IRC server as a side effect) from the rest of its code (that we regroup in
+the @{Bookmaker_lib@} module, so that we can build a test program with the
+bot functions that does not connect anywhere!
 
-With almost the same @{init@} function than the @{loader@} bot:
-
-@O@<bookmaker.ml@>==@{@-
+@O@<bookmaker_lib.ml@>==@{@-
 open Batteries
 
 @<NicksSort@>
@@ -261,6 +314,13 @@ open Batteries
 
 open Api
 @<Gambling@>
+@}
+
+With almost the same @{init@} function than the @{loader@} bot:
+
+@O@<bookmaker.ml@>==@{@-
+open Bookmaker_lib
+open Api
 
 let init =
     start ~servername:!servername
