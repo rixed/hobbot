@@ -81,6 +81,6 @@ all_tests.ml: $(TEST_SOURCES)
 
 check: all_tests.byte
 	@echo "Running inline tests"
-	@timeout 10s ./$< --shuffle || echo "Timeout!"
+	@timeout 10s ./$< --shuffle || echo "Fail!"
 
 
