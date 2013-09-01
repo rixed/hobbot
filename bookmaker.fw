@@ -141,36 +141,36 @@ and for each gamble a list of bets. Aside from that, we also keep record of
 all refunds. Everything is stored in a single @{database@} record so that
 it's easier to (un)marshal.
 
-@$@<Database@>+=@{@-
-type database = { gambles : (string, Gamble.t) Hashtbl.t ;
-          mutable refunds : Payment.t list }
-
-let make_empty_database () =
-    { gambles = Hashtbl.create 11 ;
-      refunds = [] }
-
-let database =
-    try File.with_file_in "gambles.db" Marshal.input
-    with Sys_error _ -> make_empty_database ()
-@}
-
 Also, in order not to repeat the gamble name in almost every command, we will
 have a current, "on topic", gamble. This topic should be automatically set to
 last mentioned gamble name.
 
 @$@<Database@>+=@{@-
-let current_gamble = ref None
+type database = { gambles : (string, Gamble.t) Hashtbl.t ;
+          mutable refunds : Payment.t list ;
+          mutable current : Gamble.t option }
 
-let set_topic g = current_gamble := Some g
+let make_empty_database () =
+    { gambles = Hashtbl.create 11 ;
+      refunds = [] ;
+      current = None }
+
+let db_file = "gambles.db"
+
+let database =
+    try File.with_file_in db_file Marshal.input
+    with Sys_error _ -> make_empty_database ()
 @}
 
 With these data structures in place our required functions are trivial:
 
 @$@<Database@>+=@{
+let set_current g = database.current <- Some g
+
 let add_gamble name descr =
     let gamble = Gamble.make name descr in
     Hashtbl.add database.gambles name gamble ;
-    set_topic gamble
+    set_current gamble
 
 let find_gamble g = Hashtbl.find_option database.gambles g
 
@@ -288,6 +288,16 @@ let on_msg_to_bookmaker ~priv state src dst msg =
             match pending_gambles () with
             | []  -> Irc.tell state.tcp [dst] "No pending gambles"
             | lst -> List.iter say_gamble lst) ;
+        regexp "^\\(about\\|bet +on\\|topic\\) +\\(.*\\)$", (fun () ->
+            let name = matched_group 2 msg in
+            (match find_gamble name with
+            | None -> "What's that?"
+            | Some g when g.Gamble.outcome <> None ->
+                "This gamble is already settle"
+            | Some g ->
+                set_current g ;
+                "Let's talk about "^g.Gamble.name^" ("^g.Gamble.description^")") |>
+            Irc.tell state.tcp [dst]) ;
         regexp "^gamble +\\([^ ]+\\)\\( +\\(.*\\)\\)?", (fun () ->
             let name = matched_group 1 msg
             and descr = try matched_group 3 msg with Not_found -> "" in
@@ -299,7 +309,7 @@ let on_msg_to_bookmaker ~priv state src dst msg =
             and payee = matched_group 3 msg |> String.nsplit ~by:","
             and min = try Some (matched_group 4 msg |> int_of_string) with Not_found -> None
             and max = try Some (matched_group 5 msg |> int_of_string) with Not_found -> None in
-            match !current_gamble with
+            match database.current with
             | None -> Irc.tell state.tcp [dst] "What are we gambling on?"
             | Some g ->
                 let open Gamble in
@@ -316,7 +326,7 @@ let on_msg_to_bookmaker ~priv state src dst msg =
                         g.name outcome |>
                     Irc.tell state.tcp [dst])) ;
         regexp "^\\(outcome\\|result\\)[^0-9-]*\\(-?[0-9]+\\)$", (fun () ->
-            match !current_gamble with
+            match database.current with
             | None -> Irc.tell state.tcp [dst] "What were we gambling on?"
             | Some g ->
                 (match g.Gamble.outcome with
@@ -338,7 +348,7 @@ let on_msg_to_bookmaker ~priv state src dst msg =
                 Irc.tell state.tcp [dst] "Ok"
             with Failure str ->
                 Irc.tell state.tcp [dst] ("Cant do that: "^str)) ;
-        regexp "", (fun () -> Irc.tell state.tcp [dst] "Are you talking to me?!") ]
+        regexp "", (fun () -> Irc.tell state.tcp [dst] "Are you talking to me?!") ] ;
 @}
 
 Beware! Regular expressions spotted! Get your tests ready:
@@ -394,6 +404,22 @@ Beware! Regular expressions spotted! Get your tests ready:
 *)
 @}
 
+Notice that we haven't saved the database at any point yet. We must avoid
+saving it while testing @{on_msg_to_bookmaker@}, so that's why we wrap this
+function into another one that will save the database after each command
+(better too much savings than forgiving one), and will pass this wrapper to
+@{start@} instead:
+
+@$@<Database@>+=@{@-
+let save_database () =
+    File.with_file_out db_file (fun oc ->
+        Marshal.output oc database)
+
+let with_save f x =
+    finally save_database
+        f x ;
+@}
+
 We have to take care to split the initialization of the bot (which connects
 to IRC server as a side effect) from the rest of its code (that we regroup in
 the @{Bookmaker_lib@} module, so that we can build a test program with the
@@ -419,8 +445,10 @@ open Bookmaker_lib
 open Api
 
 let init =
+    let on_msg ~priv state src dst msg =
+        with_save (on_msg_to_bookmaker ~priv state src dst) msg in
     start ~servername:!servername
           ~servicename:!servicename
           ~nick:(!nick ^"-bookmaker")
-          !channels on_msg_to_bookmaker
+          !channels on_msg
 @}
