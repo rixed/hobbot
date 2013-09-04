@@ -39,6 +39,8 @@ Regular expression seams the more appropriate here: more formal parsing
 seams overkill considering the simplicity of the grammar and manual
 string parsing is too error prone.
 
+@B@<Parsing IRC protocol@>
+
 The few parameters which type is not a trivial strings (such as the list of
 channel modes, the integer hop count...) are of limited interest for an IRC
 bot. Thus, instead of (de)serializing every possible command into a proper
@@ -126,47 +128,47 @@ This @{IrcClient@} will take a reader function that takes a @{msg@}.
 Here is how to build an event reader function from it:
 
 @$@<IRCReader@>==@{@-
-let reader_of_msg_reader msg_reader =
-    let line_reader line =
-        parse line |> msg_reader in
-    Event.reader_of_line_reader line_reader
+let line_reader_of_msg_reader msg_reader =
+    fun line -> parse line |> msg_reader
 @}
 
-This will return a function suitable for @{TcpClient.make@}.
+This will return a line reading function suitable for @{TcpClient.make@}.
 
 On the other way around, we'd like helper functions to send common IRC
-commands (using @{TcpClient.send_string@}. These are trivial:
+commands (using the writer function returned by @{TcpClient.make@} along
+the event handler. These are trivial:
 
 @$@<IRCSendHelpers@>==@{@-
-let send_cmd t str =
-    Event.TcpClient.send_string t (str ^"\r\n")
+let send_cmd write str =
+    write (str ^"\r\n")
 
-let login t ?pass ?username ?realname nick =
+let login write ?pass ?username ?realname nick =
     let username = Option.default nick username
     and realname = Option.default nick realname in
     Option.may (fun pass ->
-        send_cmd t ("PASS "^pass))
+        send_cmd write ("PASS "^pass))
         pass ;
-    send_cmd t ("NICK "^nick) ;
+    send_cmd write ("NICK "^nick) ;
     let hostname = "ignored" and servername = "ignored" in
-    send_cmd t ("USER "^username^" "^hostname^" "^servername^" :"^realname)
+    send_cmd write ("USER "^username^" "^hostname^" "^servername^" :"^realname)
 
-let quit ?(reason="Life's boring") t =
-    send_cmd t ("QUIT :"^reason)
+let quit ?(reason="Life's boring") write =
+    send_cmd write ("QUIT :"^reason)
 
 (* No support for passwords *)
-let join t channels =
-    send_cmd t ("JOIN "^ String.join "," channels)
+let join write channels =
+    send_cmd write ("JOIN "^ String.join "," channels)
 
-let leave t channels =
-    send_cmd t ("PART "^ String.join "," channels)
+let leave write channels =
+    send_cmd write ("PART "^ String.join "," channels)
 
-let topic t ?text channel =
-    send_cmd t ("TOPIC "^channel^ match text with None      -> ""
-                                                | Some text -> " :"^ text)
+let topic write ?text channel =
+    let str = match text with None      -> ""
+                            | Some text -> " :"^ text in
+    send_cmd write ("TOPIC "^channel^ str)
 
-let tell t receivers text =
-    send_cmd t ("PRIVMSG "^ String.join "," receivers ^" :"^ text)
+let tell write receivers text =
+    send_cmd write ("PRIVMSG "^ String.join "," receivers ^" :"^ text)
 @}
 
 Putting it all together in an @{Irc@} module, we can now read and write

@@ -168,23 +168,126 @@ Note that we use physical equality to @{unregister@} an handler.  The event
 handler that wish to be able to unregister itself must then take care of
 keeping a grip on itself.
 
-Packaging all this into an @{Event@} module:
+@B@<Buffered reads/writes@>
 
-@O@<event.ml@>==@{@-
-open Batteries
-@<EventHandler@>
-@<SelectLoop@>
-@<EventHandlerSamples@>
+Many of our event handlers (TCP client, coprocess...) will need to be able to
+read/write lines from a file descriptor that can not accept/deliver a full line,
+thus the need for buffering. Here we are going to implement a simple buffering
+mechanism.
+
+From two file descriptors, one for writing and another one for reading (might be
+twice the same, for a TCP client for instance) and a line reader function,
+we will register the corresponding event handler and return a write function,
+associating a buffer to each of the file descriptors:
+
+@$@<MakeBufferedIO@>==@{@-
+let start infd outfd line_cb =
+    let inbuf = Buffer.create 500
+    and outbuf = Buffer.create 500 in
+    let register_files (rfiles, wfiles, efiles) =
+        let buffer_is_empty b = Buffer.length b = 0 in
+        infd :: rfiles,
+        (if buffer_is_empty outbuf then wfiles else outfd :: wfiles),
+        efiles in
+    let process_files handler (rfiles, wfiles, _) =
+        if List.mem infd rfiles then
+            try_read_line infd inbuf line_cb handler ;
+        if List.mem outfd wfiles then
+            try_write_buf outbuf outfd in
+    register { register_files ; process_files } ;
+    Buffer.add_string outbuf
+@}
+
+Notice how simple the write function is (merely @{Buffer.add_string outbuf@}
+that append the given string at the end of the output buffer. We want select to
+monitor the output file descriptor @{outfd@} whenever this @{outbuf@} is not
+empty, and then we react to this file readiness to be written by merely writing
+as much as we can for @{outbuf@}:
+
+@$@<WriteBuf@>+=@{@-
+let try_write_buf buf fd =
+    let str = Buffer.contents buf in
+    let sz = Unix.single_write fd str 0 (String.length str) in
+    Buffer.clear buf ;
+@}
+
+We must requeue what was not written into the file descriptor. The stock stdlib
+buffers are not very convenient for this kind of buffering, and should we care
+about performance we'd have to rewrite this using a more to the point buffer
+implementation.
+
+@$@<WriteBuf@>+=@{@-
+    Buffer.add_substring buf str sz (String.length str - sz)
+@}
+
+In the other direction, we always ask select to monitor the file descriptor
+for input (@{infd@}) and append to our input buffer (@{inbuf@}) whatever can
+be read from it ; then we try to read complete lines from this buffer and pass
+each of them to the user provided callback function @{line_cb@}, signaling
+enf of files with a special @{EndOfFile@} value.
+
+Notice that on such occurrence we do *not* close the file since some users
+might want to do something special in addition (for instance, the coprocess
+controller will want to call @{Unix.close_process@}), but we do unregister the
+handler (as we have performed the registration).
+
+@$@<ReadBuf@>+=@{@-
+type line = Line of string | EndOfFile
+
+let try_read_line fd buf line_cb handler =
+    (* Append what can be read from fd into buf ;
+       notice that if more than 1500 bytes are available
+       then the event loop will call us again at oince *)
+    let str = String.create 1500 in
+    let sz = Unix.read fd str 0 (String.length str) in
+    if sz = 0 then (
+        line_cb EndOfFile ;
+        unregister handler
+    ) else (
+        Buffer.add_substring buf str 0 sz ;
+        (* Beware that we may have 0, 1 or more lines in rbuf *)
+        let rec try_next_line content ofs =
+            try let eol = String.find_from content ofs "\n" in
+                let eol, eolen =
+                    if eol > 0 && content.[eol-1] = '\r' then
+                        eol - 1, 2
+                    else eol, 1 in
+                let line = String.sub content ofs (eol - ofs) in
+                line_cb (Line line) ;
+                try_next_line content (eol+eolen)
+            with Not_found -> ofs in
+@}
+
+Notice that @{String.find_from@} will raise Not_found if @{ofs@} points to the
+end of the string (nul terminator is a valid position, @^h(e0) la C.
+
+@$@<ReadBuf@>+=@{@-
+        let content = Buffer.contents buf in
+        Buffer.clear buf ;
+        let ofs = try_next_line content 0 in
+        Buffer.add_substring buf content ofs (String.length content - ofs) ;
+    )
+@}
+
+We can make the @{BufferedIO@} module from the above functions:
+
+@$@<BufferedIO@>==@{@-
+module BufferedIO =
+struct
+    @<WriteBuf@>
+    @<ReadBuf@>
+    @<MakeBufferedIO@>
+end
 @}
 
 @B@<A TCP Client@>
 
 Now that this basic framework is in place, lets implement an @{Event.handler@}
-for a basic TCP client. This is easy since a TCP client has to deal with only
-one file descriptor.
+for a basic TCP client. The only thing left to do is to build the file descriptor
+to do buffered IO on (the same socket being used both for reading and writing).
 
-Before building an event handler we need to know how to build a connected socket
-from a hostname and a servicename (both strings):
+So before building a proper event handler we need to know how to build a
+connected socket from a hostname and a servicename (both strings):
 
 @$@<TcpConnect@>==@{@-
 let tcp_connect host service =
@@ -203,128 +306,78 @@ let tcp_connect host service =
 While we are at it, closing might be useful:
 
 @$@<TcpClose@>==@{@-
-let tcp_close t =
+let tcp_close fd =
     Log.debug "Closing TCP connection" ;
-    Unix.close t.sock
+    Unix.close fd
 @}
 
-We will store this socket into a data structure representing a TCP client.
-What else do we need in this record? Remember we said we'll have to buffer
-reads and writes, so we need two buffers as well. Later, we may want to add
-enough informations to reconnect automatically to the server.
+Now given a line reading function, a host and service names, we can quite
+simply return an @{event_handler@}:
 
-@$@<TcpClient@>==@{@-
-type t = { sock : Unix.file_descr ;
-           rbuf : Buffer.t ;
-           wbuf : Buffer.t }
+@$@<TcpMake@>==@{@-
+let start host service line_cb =
+    try let fd = tcp_connect host service in
+        let my_line_cb = function
+            | BufferedIO.EndOfFile ->
+                tcp_close fd
+            | BufferedIO.Line str ->
+                line_cb str
+        in
+        BufferedIO.start fd fd my_line_cb
+    with Not_found ->
+        failwith ("Cannot connect to "^ host ^":"^ service)
 @}
 
-Given this record, the register_files for this TCP client is trivial:
-
-@$@<TcpRegisterFiles@>==@{@-
-let buffer_is_empty b =
-    Buffer.length b = 0
-
-let register_files t (rfiles, wfiles, efiles) =
-    t.sock :: rfiles,
-    (if buffer_is_empty t.wbuf then wfiles else t.sock :: wfiles),
-    efiles
-@}
-
-Notice that with regard to writing, we merely ask to monitor writability of the
-file if we actually have something to write. Event handler will merely append
-content to write in the write buffer @{wbuf@} so that this direction of the
-communication is quite simple:
-
-@$@<TcpWrite@>==@{@-
-(* Called by event handler whenever sock is writable *)
-let handle_write t =
-    let content = Buffer.contents t.wbuf in
-    let sz = Unix.single_write t.sock content 0 (String.length content) in
-    Buffer.clear t.wbuf ;
-    Buffer.add_substring t.wbuf content sz (String.length content - sz)
-
-let send_string t str =
-    Buffer.add_string t.wbuf str
-@}
-
-Notice that we requeue what was not written into the buffer. The stock stdlib
-buffers are not very convenient for this kind of buffering, and should we care
-about performance at this point then we should rewrite this using a more to the
-point buffer implementation.
-
-With regard to reception of messages a generic TCP client cannot do much without knowing
-the length of incoming messages, that is why the @{handle_read@} function is the
-responsibility of the user. We now have completed our small @{TcpClient@} event
-handler:
+We now have completed our small @{TcpClient@} event handler:
 
 @$@<EventHandlerSamples@>+=@{@-
 module TcpClient =
 struct
-    @<TcpClient@>
     @<TcpConnect@>
     @<TcpClose@>
-    @<TcpRegisterFiles@>
-    @<TcpWrite@>
-
-    let make host service =
-        try { sock = tcp_connect host service ;
-              rbuf = Buffer.create 500 ;
-              wbuf = Buffer.create 500 }
-        with Not_found ->
-                failwith ("Cannot connect to "^ host ^":"^ service)
-
-    let event_handler t reader =
-        let process_files t handler (rfiles, wfiles, _) =
-            (* Only call reader if t.sock is readable *)
-            if List.mem t.sock rfiles then
-                reader t handler ;
-            if List.mem t.sock wfiles then
-                handle_write t
-        in
-        { register_files = register_files t ;
-           process_files = process_files t }
+    @<TcpMake@>
 end
 @}
 
-But what we want is not this mere generic TCP client but an IRC client
-that will call specific callbacks to handle interesting IRC events.
-As we are about to see, IRC is a line oriented protocol; So let's build
-a line oriented TCP client.
+@B@<Coprocess@>
 
-This is enough to build a generic @{reader@} out of a @{line_reader@}
-that should receive only commplete lines, one by one, without the need
-to care about the read buffer:
+Given we don't really care about standard error for this simple scenario,
+controlling a coprocess is even simpler than the TCP client. The function
+below register an event handler from a command string and a line reader callback:
 
-@$@<EventHandlerSamples@>+=@{@-
-
-(* Given a line reading function returns a reader function
-   suitable for TcpClient.make *)
-let reader_of_line_reader line_reader t handler =
-    let open TcpClient in
-    (* Append what can be read from t.sock into rbuf *)
-    let str = String.create 1500 in
-    let sz = Unix.read t.sock str 0 (String.length str) in
-    (* If we are done, close and unregister *)
-    if sz = 0 then (
-        Log.debug "TCP cnx closed" ;
-        tcp_close t ;
-        unregister handler
-    ) else
-    Buffer.add_substring t.rbuf str 0 sz ;
-    Log.debug "read %d bytes (now got %d: '%s')" sz (Buffer.length t.rbuf) (Buffer.contents t.rbuf) ;
-    (* Beware that we may have 0, 1 or more lines in rbuf *)
-    let rec try_next_line content ofs =
-        try let eol = String.find_from content ofs "\r\n" in
-            line_reader (String.sub content ofs (eol - ofs)) ;
-            try_next_line content (eol+2)
-        with Not_found -> ofs in
-    let content = Buffer.contents t.rbuf in
-    Buffer.clear t.rbuf ;
-    let ofs = try_next_line content 0 in
-    Buffer.add_substring t.rbuf content ofs (String.length content - ofs)
+@$@<MakeCoprocess@>+=@{@-
+module Coprocess =
+struct
+    let start cmd line_cb =
+        Log.debug "running command '%s'" cmd ;
+        let infd, outfd = Unix.open_process cmd in
+        BufferedIO.(start
+            (Unix.descr_of_in_channel infd)
+            (Unix.descr_of_out_channel outfd)
+            (function
+                | Line str  -> line_cb str
+                | EndOfFile ->
+                    Log.debug "End of command '%s'" cmd ;
+                    ignore (Unix.close_process (infd, outfd))))
+end
 @}
 
-(Notice that @{String.find_from@} will raise Not_found if @{ofs@} points to the
-end of the string (nul terminator is a valid position, @^h(e0) la C).
+Which is a little too complex than necessary, due to the variety of types
+available to represent mere file descriptors.
 
+Notice that if we were not calling @{Unix.close_process@} to both close the
+file descriptors *and* read the coprocess exit status, then a new zombie
+process would stay around for each coprocess that our program would run!
+
+@B@<Putting it all together@>
+
+Packaging all this into an @{Event@} module:
+
+@O@<event.ml@>==@{@-
+open Batteries
+@<EventHandler@>
+@<SelectLoop@>
+@<BufferedIO@>
+@<EventHandlerSamples@>
+@<MakeCoprocess@>
+@}

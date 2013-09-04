@@ -36,12 +36,13 @@ plug-in.
 module StringSet = Set.Make (String)
 
 type state = { channels : (string, channel_state) Hashtbl.t ;
-                    tcp : Event.TcpClient.t }
+          mutable write : string -> unit }
 and channel_state = { topic : string ;
                       users : StringSet.t }
 
-let make_empty_state tcp =
-    { channels = Hashtbl.create 7 ; tcp }
+let make_empty_state () =
+    { channels = Hashtbl.create 7 ;
+      write = ignore }
 
 let start ~servername ~servicename
           ~nick ?pass channels on_msg =
@@ -65,10 +66,11 @@ let start ~servername ~servicename
             else
                 false, msg
     in
-    let msg_reader state = function
+    let state = make_empty_state () in
+    let msg_reader = function
         | _, "376", _ ->
             Log.debug "Received END of MOTD -> send JOIN" ;
-            Irc.join state.tcp channels
+            Irc.join state.write channels
         | _, "332", [_ ; [chn]; [topic]] ->
             Log.debug "Received TOPIC for channel %s: %s" chn topic ;
             set_topic state chn topic
@@ -87,18 +89,14 @@ let start ~servername ~servicename
                 on_msg ~priv state src dst msg) dsts
         | _, cmd, _ ->
             Log.debug "Ignoring command %s" cmd in
-    (* Establish TCP connection *)
-    let tcp = Event.TcpClient.make servername servicename in
-    (* Build a fresh new state *)
-    let state = make_empty_state tcp in
-    (* Write the Join (won't be sent until event loop is run *)
-    Irc.login tcp ?pass nick ;
     (* Build an event reader function from our IRC reader function *)
-    let reader = Irc.reader_of_msg_reader (msg_reader state) in
-    (* Build an event_handler for this IRC connection *)
-    let handler = Event.TcpClient.event_handler tcp reader in
-    (* And register it *)
-    Event.register handler
+    let line_cb = Irc.line_reader_of_msg_reader msg_reader in
+    (* Establish TCP connection *)
+    let write = Event.TcpClient.start servername servicename line_cb in
+    (* Save write function in state *)
+    state.write <- write ;
+    (* Write the Join (won't be sent until event loop is run *)
+    Irc.login write ?pass nick
 @}
 
 We are now close to the real thing. The only part left is to choose how
@@ -180,12 +178,12 @@ let on_msg_to_loader ~priv state _src dst msg =
     let open Str in
     if priv then Api.react_to_msg state msg [
         regexp "^help$", (fun () ->
-            Irc.tell state.tcp [dst] "See my internals at https://github.com/rixed/hobbot") ;
+            Irc.tell state.write [dst] "See my internals at https://github.com/rixed/hobbot") ;
         regexp "^load *\\(.*\\)$", (fun () ->
             let libname = matched_group 1 msg in
             let result = try load_lib libname ; "loaded"
                          with _ -> "fail" in
-            Irc.tell state.tcp [dst] result) ]
+            Irc.tell state.write [dst] result) ]
 @}
 
 So we can regroup everything for the library into the @{api@} module:

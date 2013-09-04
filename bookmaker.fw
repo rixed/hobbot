@@ -262,7 +262,7 @@ let on_msg_to_bookmaker ~priv state src dst msg =
     let open Str in
     if priv then Api.react_to_msg state msg [
         regexp "^help$", (fun () ->
-            Irc.tell state.tcp [dst] help) ;
+            Irc.tell state.write [dst] help) ;
         regexp "^\\(.*\\bcompens.+ +\\)?\\(accounts\\|debts\\)\\( +.*\\bcompens.*\\)?$", (fun () ->
             let found_group n =
                 try ignore (group_beginning n) ; true
@@ -275,18 +275,18 @@ let on_msg_to_bookmaker ~priv state src dst msg =
                     qtt what
                     nicks_print payee ;
                 IO.close_out os |>
-                Irc.tell state.tcp [dst] in
+                Irc.tell state.write [dst] in
             match pending_debts compensate with
-            | []  -> Irc.tell state.tcp [dst] "Good accounts make good friends"
+            | []  -> Irc.tell state.write [dst] "Good accounts make good friends"
             | lst -> List.iter say_debt lst) ;
         regexp "^pendings?", (fun () ->
             let say_gamble g =
                 let open Gamble in
                 Printf.sprintf "[%s] %s (%s)"
                     g.name g.description (string_of_ts g.date) |>
-                Irc.tell state.tcp [dst] in
+                Irc.tell state.write [dst] in
             match pending_gambles () with
-            | []  -> Irc.tell state.tcp [dst] "No pending gambles"
+            | []  -> Irc.tell state.write [dst] "No pending gambles"
             | lst -> List.iter say_gamble lst) ;
         regexp "^\\(about\\|bet +on\\|topic\\) +\\(.*\\)$", (fun () ->
             let name = matched_group 2 msg in
@@ -297,12 +297,12 @@ let on_msg_to_bookmaker ~priv state src dst msg =
             | Some g ->
                 set_current g ;
                 "Let's talk about "^g.Gamble.name^" ("^g.Gamble.description^")") |>
-            Irc.tell state.tcp [dst]) ;
+            Irc.tell state.write [dst]) ;
         regexp "^gamble +\\([^ ]+\\)\\( +\\(.*\\)\\)?", (fun () ->
             let name = matched_group 1 msg
             and descr = try matched_group 3 msg with Not_found -> "" in
             add_gamble name descr ;
-            Irc.tell state.tcp [dst] ("Accepting bets for "^name)) ;
+            Irc.tell state.write [dst] ("Accepting bets for "^name)) ;
         regexp "^bet +\\([0-9]+\\) +\\(.*[^s]\\)s? +with +\\([^ ]+\\) +on +\\(-?[0-9]+\\)?\\.\\.\\(-?[0-9]+\\)?$", (fun () ->
             let qtt = matched_group 1 msg |> int_of_string
             and what = matched_group 2 msg
@@ -310,7 +310,7 @@ let on_msg_to_bookmaker ~priv state src dst msg =
             and min = try Some (matched_group 4 msg |> int_of_string) with Not_found -> None
             and max = try Some (matched_group 5 msg |> int_of_string) with Not_found -> None in
             match database.current with
-            | None -> Irc.tell state.tcp [dst] "What are we gambling on?"
+            | None -> Irc.tell state.write [dst] "What are we gambling on?"
             | Some g ->
                 let open Gamble in
                 (match g.outcome with
@@ -320,24 +320,24 @@ let on_msg_to_bookmaker ~priv state src dst msg =
                     Printf.sprintf "%s will pay %d %s to %s if outcome of %s is not within %s..%s"
                         src qtt what (matched_group 3 msg) g.name
                         (string_of_bound min) (string_of_bound max) |>
-                    Irc.tell state.tcp [dst]
+                    Irc.tell state.write [dst]
                 | Some outcome ->
                     Printf.sprintf "We already know %s outcome (%d)"
                         g.name outcome |>
-                    Irc.tell state.tcp [dst])) ;
+                    Irc.tell state.write [dst])) ;
         regexp "^\\(outcome\\|result\\)[^0-9-]*\\(-?[0-9]+\\)$", (fun () ->
             match database.current with
-            | None -> Irc.tell state.tcp [dst] "What were we gambling on?"
+            | None -> Irc.tell state.write [dst] "What were we gambling on?"
             | Some g ->
                 (match g.Gamble.outcome with
                 | None ->
                     let outcome = matched_group 2 msg |> int_of_string in
                     Gamble.set_outcome g outcome ;
-                    Irc.tell state.tcp [dst] "Ok"
+                    Irc.tell state.write [dst] "Ok"
                 | Some outcome ->
                     Printf.sprintf "Outcome of %s is already known (%d)"
                         g.Gamble.name outcome |>
-                    Irc.tell state.tcp [dst])) ;
+                    Irc.tell state.write [dst])) ;
         regexp "^\\([^ ]+\\)?\\(pay\\|refund\\)\\(ed\\)? +\\([0-9]+\\) +\\(.*[^s]\\)s? +to +\\([^ ]+\\)$", (fun () ->
             let payer = try matched_group 1 msg |> String.nsplit ~by:","
                         with Not_found -> [src]
@@ -345,10 +345,10 @@ let on_msg_to_bookmaker ~priv state src dst msg =
             and what  = matched_group 5 msg
             and payee = matched_group 6 msg |> String.nsplit ~by:"," in
             try pay payer payee what qtt ;
-                Irc.tell state.tcp [dst] "Ok"
+                Irc.tell state.write [dst] "Ok"
             with Failure str ->
-                Irc.tell state.tcp [dst] ("Cant do that: "^str)) ;
-        regexp "", (fun () -> Irc.tell state.tcp [dst] "Are you talking to me?!") ] ;
+                Irc.tell state.write [dst] ("Cant do that: "^str)) ;
+        regexp "", (fun () -> Irc.tell state.write [dst] "Are you talking to me?!") ] ;
 @}
 
 Beware! Regular expressions spotted! Get your tests ready:
@@ -356,21 +356,20 @@ Beware! Regular expressions spotted! Get your tests ready:
 @$@<Gambling@>+=@{@-
 (*$R on_msg_to_bookmaker
     let open Event.TcpClient in
+    let mock_buffer = Buffer.create 0 in
     let mock_state () =
-        let tcp =
-            { sock = Unix.stdout ;
-              rbuf = Buffer.create 0 ;
-              wbuf = Buffer.create 500 } in
-        Api.make_empty_state tcp in
+        let state = Api.make_empty_state () in
+        state.Api.write <- Buffer.add_string mock_buffer ;
+        state in
     let state = mock_state () in
     let actual_out ?(src="") msg_in =
         on_msg_to_bookmaker ~priv:true state src "#somechan" msg_in ;
         let actual_out =
-            try Buffer.contents state.Api.tcp.wbuf |>
+            try Buffer.contents mock_buffer |>
                 String.split ~by:":" |> snd |>
                 String.trim
             with Not_found -> "No answer!?" in
-        Buffer.clear state.Api.tcp.wbuf ;
+        Buffer.clear mock_buffer ;
         actual_out in
     let test ?src msg_in msg_out =
         assert_equal ~printer:identity ~msg:(msg_in^"->"^msg_out)

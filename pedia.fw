@@ -1,0 +1,58 @@
+@! vim:sw=4 ts=4 sts=4 expandtab spell spelllang=en
+@p maximum_input_line_length = 999999
+@p maximum_output_line_length = 999999
+
+@B@<Wikibot@>
+
+This robot will annoyingly tells you things about words you mentioned (taken
+from wikipedia).
+
+So it will take a random word amongst every received sentence and send a DNS
+txt query to "the_word.wp.dg.cx" and will print the answer as soon as it receives
+it.
+
+To send this query we will merely use an external program (dig), so we will make
+use of our @{Coprocess@} module.
+
+We can start framing the function reacting to incoming IRC messages:
+
+@$@<WikiOnMsg@>==@{@-
+let on_msg ~priv state _src dst msg =
+    ignore priv ;
+    match random_word msg with
+    | None -> ()
+    | Some word ->
+        Log.debug "choose word %s" word ;
+        let cmd = "dig +short txt '"^ word ^".wp.dg.cx'" in
+        Event.Coprocess.start cmd (fun str ->
+            "Did you know that "^ str |>
+            Irc.tell state.write [dst]) |>
+        ignore (* we dont have anything to write to stdin *)
+@}
+
+Given this small helper to choose an interesting word in a string:
+
+@$@<WikiHelpers@>==@{
+let random_word str =
+    let open String in
+    try Some ((nsplit ~by:" " str |> List.enum) //
+              (fun w -> length w > 6) |>
+              Random.choice)
+    with Invalid_argument _ -> None
+@}
+
+This literate bot can now be assembled:
+
+@O@<pedia.ml@>==@{@-
+open Batteries
+open Api
+
+@<WikiHelpers@>
+@<WikiOnMsg@>
+
+let init =
+    start ~servername:!servername
+          ~servicename:!servicename
+          ~nick:(!nick ^"-pedia")
+          !channels on_msg
+@}

@@ -4,6 +4,7 @@ api.ml
 loader.ml
 bookmaker.ml
 bookmaker_lib.ml
+pedia.ml
 cli.ml
 *.lis
 *.log
